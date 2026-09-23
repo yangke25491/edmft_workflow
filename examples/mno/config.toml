@@ -1,0 +1,79 @@
+# Example only. Copy this to the project root as config.toml and edit paths.
+[project]
+case = "01"
+dmft_dir = "/home/kyang/test/DMFT/MnO/02"
+work_root = "/home/kyang/test/DMFT/MnO/02/postprocess"
+
+[environment]
+wienroot = "/home/kyang/apps/edmft/wien2k"
+edmft_root = "/home/kyang/apps/edmft/eDMFT/bin"
+python = "/home/kyang/miniforge3/envs/edmft/bin/python"
+python_bin_dir = "/home/kyang/miniforge3/envs/edmft/bin"
+# setup_script = "/home/kyang/.config/edmft_workflow/env.sh"
+
+[environment_extra]
+OMP_NUM_THREADS = "1"
+MKL_NUM_THREADS = "1"
+I_MPI_HYDRA_BOOTSTRAP = "ssh"
+I_MPI_FABRICS = "shm"
+
+[commands]
+dmft_copy = "dmft_copy.py"
+saverage = "saverage.py"
+maxent = "maxent_run.py"
+x_dmft = "x_dmft.py"
+wien_x = "x"
+
+[convergence]
+max_dn = 0.005
+outer_drift = 0.005
+block_postprocess = true
+
+[maxent]
+impurity = 1
+average_last = 5
+
+[maxent_params]
+statistics = "fermi"
+Ntau = 300
+L = 20.0
+x0 = 0.005
+bwdth = 0.004
+Nw = 300
+gwidth = 30.0
+idg = 1
+deltag = 0.004
+Asteps = 4000
+alpha0 = 1000
+min_ratio = 0.001
+iflat = 1
+Nitt = 1000
+Nr = 0
+Nf = 40
+
+[dos]
+nomega = 200
+wmin = -3.0
+wmax = 1.0
+
+[band]
+nomega = 200
+wmin = -6.0
+wmax = 6.0
+klist_source = "@wien:fcc.klist"
+
+[plot]
+orbital_labels = ["eg", "t2g"]
+cdos_labels = ["Total DOS", "Mn-d"]
+dos_xmin = -3.0
+dos_xmax = 1.0
+akw_intensity = 0.97
+drop_klabels = ["LAMBDA", "DELTA", "Z"]
+
+[pbs]
+qsub = "qsub"
+queue = "batch"
+nodes = 1
+ppn = 8
+mem = "16gb"
+walltime = "04:00:00"
