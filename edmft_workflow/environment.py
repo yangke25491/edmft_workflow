@@ -4,21 +4,14 @@ from pathlib import Path
 import shlex
 import subprocess
 
-from .utils import WorkflowError
+from .utils import WorkflowError, shell_preamble
 
 
 def _wrapped_script(cfg, body: str) -> str:
-    lines = ["set -e"]
-    setup = cfg.get("environment.setup_script")
-    if setup:
-        lines.append(f"source {shlex.quote(str(setup))}")
-    else:
-        if cfg.get("environment.wienroot"):
-            lines.append(f"export WIENROOT={shlex.quote(str(cfg.get('environment.wienroot')))}")
-        if cfg.get("environment.edmft_root"):
-            lines.append(f"export WIEN_DMFT_ROOT={shlex.quote(str(cfg.get('environment.edmft_root')))}")
-    lines.append(body)
-    return "\n".join(lines)
+    # Use the exact same runtime setup as numerical stages/PBS generation.
+    cwd = Path.cwd().resolve()
+    scratch = cwd / ".edmft_workflow_preflight_tmp"
+    return shell_preamble(cfg, cwd, scratch=scratch) + "\n" + body
 
 
 def _run_shell(cfg, body: str) -> tuple[int, str]:
@@ -34,6 +27,13 @@ def _run_shell(cfg, body: str) -> tuple[int, str]:
 def environment_report(cfg) -> list[tuple[str, bool, str]]:
     """Validate the MPI/MKL/Python runtime shared by foreground and PBS jobs."""
     checks: list[tuple[str, bool, str]] = []
+
+    intel_root = cfg.get("environment.intel_root")
+    if intel_root:
+        p = Path(str(intel_root)).expanduser()
+        cv = p / "linux/bin/compilervars.sh"
+        checks.append(("environment.intel_root", p.is_dir(), str(p)))
+        checks.append(("Intel compilervars", cv.is_file(), str(cv)))
 
     setup = cfg.get("environment.setup_script")
     if setup:
@@ -71,8 +71,6 @@ def environment_report(cfg) -> list[tuple[str, bool, str]]:
             detail = "; ".join(missing) if missing else "all shared libraries resolved"
             checks.append((f"ldd {exe}", ok, detail))
 
-    # Explicit MKL load test: these were the exact libraries that previously
-    # failed at runtime on the cluster.
     rc, text = _run_shell(
         cfg,
         f"{pyq} - <<'PY'\n"
