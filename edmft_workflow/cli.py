@@ -6,6 +6,7 @@ import sys
 from .config import ConfigError, load_config
 from .utils import WorkflowError
 from .checks import convergence_report, doctor, format_convergence
+from .environment import print_environment_report
 from .production import init_layout, prepare_dmft, run_dft, run_dmft
 from .maxent import run_maxent
 from .realaxis import run_dos
@@ -27,52 +28,53 @@ def _build_parser() -> argparse.ArgumentParser:
     prepdmft = sub.add_parser("prepare-dmft", help="Copy converged DFT files into dmft/; does NOT run init_dmft.py")
     prepdmft.add_argument("--force", action="store_true")
 
-    sub.add_parser("doctor", help="Check required files and basic environment assumptions")
+    sub.add_parser("doctor-env", help="Check Intel MPI, mpi4py, MKL and eDMFT shared-library runtime")
+    sub.add_parser("doctor", help="Check required DMFT files and basic workflow assumptions")
     sub.add_parser("check", help="Summarize info.iterate convergence")
 
-    runp = sub.add_parser("run", help="Run one workflow stage in the foreground/current job")
+    runp = sub.add_parser(
+        "run",
+        help="Run a stage in the current shell/job. Production compute stages are normally submitted through PBS.",
+    )
     runp.add_argument("stage", choices=["dft", "dmft", "maxent", "dos", "band", "plots", "post", "all"])
     runp.add_argument("--force", action="store_true", help="Back up/recreate post-processing stage directories when supported")
 
-    prep = sub.add_parser("pbs", help="Write a PBS script without submitting it")
+    prep = sub.add_parser("pbs", help="Write a PBS compute script without submitting it")
     prep.add_argument("stage", choices=["dft", "dmft", "maxent", "dos", "band"])
     prep.add_argument("--force", action="store_true")
 
-    submit = sub.add_parser("submit", help="Submit one stage or the post-processing chain to PBS/Torque")
+    submit = sub.add_parser("submit", help="Submit a compute stage or the post-processing compute chain to PBS/Torque")
     submit.add_argument("stage", choices=["dft", "dmft", "maxent", "dos", "band", "post"])
     submit.add_argument("--force", action="store_true")
     return p
 
 
 def _run_stage(cfg, stage: str, force: bool) -> None:
+    # Numerical stages intentionally do not plot. Plotting is a fast, headless
+    # foreground task (`run plots`) and should not waste an allocated PBS node.
     if stage == "dft":
         run_dft(cfg)
     elif stage == "dmft":
         run_dmft(cfg)
     elif stage == "maxent":
         run_maxent(cfg, force=force)
-        plot_self_energy(cfg)
     elif stage == "dos":
         run_dos(cfg, force=force)
-        plot_dos(cfg)
     elif stage == "band":
         run_band(cfg, force=force)
-        plot_akw(cfg)
     elif stage == "plots":
         plot_self_energy(cfg)
         plot_dos(cfg)
         plot_akw(cfg)
     elif stage == "post":
+        # Foreground/debug convenience only. For production use `submit post`.
         run_maxent(cfg, force=force)
-        plot_self_energy(cfg)
         run_dos(cfg, force=force)
-        plot_dos(cfg)
         run_band(cfg, force=force)
-        plot_akw(cfg)
     elif stage == "all":
         raise WorkflowError(
             "'run all' is intentionally disabled because init_lapw and init_dmft.py are manual checkpoints. "
-            "Use run dft, then prepare-dmft + manual init_dmft.py, then run dmft, then run post."
+            "Use submit dft, then prepare-dmft + manual init_dmft.py, then submit dmft, then submit post."
         )
 
 
@@ -88,6 +90,9 @@ def main(argv=None) -> int:
         if args.command == "prepare-dmft":
             prepare_dmft(cfg, force=args.force)
             return 0
+
+        if args.command == "doctor-env":
+            return 0 if print_environment_report(cfg) else 2
 
         if args.command == "doctor":
             all_ok = True
@@ -120,7 +125,8 @@ def main(argv=None) -> int:
             j1 = submit_pbs(cfg, "maxent", force=args.force)
             j2 = submit_pbs(cfg, "dos", force=args.force, depends_on=j1)
             j3 = submit_pbs(cfg, "band", force=args.force, depends_on=j2)
-            print(f"post chain: maxent={j1} -> dos={j2} -> band={j3}")
+            print(f"post compute chain: maxent={j1} -> dos={j2} -> band={j3}")
+            print("After the band job finishes, run `edmft-workflow -c config.toml run plots` in the foreground.")
             return 0
 
         return 1
