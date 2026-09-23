@@ -122,8 +122,34 @@ def assert_log_contains(path: Path, marker: str) -> None:
         raise WorkflowError(f"Success marker {marker!r} not found in {path}")
 
 
-def build_runtime_env(cfg, cwd: Path) -> dict[str, str]:
-    env: dict[str, str] = {"SCRATCH": str(cwd)}
+def copy_case_files(source: Path, target: Path, case: str, suffixes: Sequence[str], required: bool = True) -> None:
+    """Copy named WIEN2k case files explicitly.
+
+    dmft_copy.py intentionally does not guarantee that every WIEN2k potential file
+    needed by a later LAPW1 invocation is present.  Keeping this explicit avoids
+    hidden dependencies on a parent directory.
+    """
+    target.mkdir(parents=True, exist_ok=True)
+    for suffix in suffixes:
+        src = source / f"{case}.{suffix}"
+        if not src.exists():
+            if required:
+                raise WorkflowError(f"Required WIEN2k file is missing: {src}")
+            continue
+        if src.stat().st_size == 0:
+            if required:
+                raise WorkflowError(f"Required WIEN2k file is empty: {src}")
+            continue
+        shutil.copy2(src, target / src.name)
+
+
+def build_runtime_env(cfg, cwd: Path, scratch: Path | None = None) -> dict[str, str]:
+    # For ordinary WIEN2k DFT runs we explicitly pass dft/tmp.  For Haule's
+    # x_dmft.py/run_dmft.py, current upstream W2kEnvironment uses '.' internally,
+    # so the stage working directory remains the effective eDMFT scratch location.
+    effective_scratch = (scratch or cwd).resolve()
+    effective_scratch.mkdir(parents=True, exist_ok=True)
+    env: dict[str, str] = {"SCRATCH": str(effective_scratch)}
     wienroot = cfg.get("environment.wienroot")
     edmft_root = cfg.get("environment.edmft_root")
     python_dir = cfg.get("environment.python_bin_dir")
@@ -145,7 +171,8 @@ def build_runtime_env(cfg, cwd: Path) -> dict[str, str]:
     return env
 
 
-def shell_preamble(cfg, cwd: Path) -> str:
+def shell_preamble(cfg, cwd: Path, scratch: Path | None = None) -> str:
+    effective_scratch = (scratch or cwd).resolve()
     lines = ["set -euo pipefail", f"cd {shlex.quote(str(cwd))}"]
     setup = cfg.get("environment.setup_script")
     if setup:
@@ -165,15 +192,23 @@ def shell_preamble(cfg, cwd: Path) -> str:
         lines.append(f"export PYTHONPATH={shlex.quote(str(edmft_root))}:${{PYTHONPATH:-}}")
     lines.append("export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}")
     lines.append("export MKL_NUM_THREADS=${MKL_NUM_THREADS:-1}")
-    lines.append("export SCRATCH=$PWD")
+    lines.append(f"mkdir -p {shlex.quote(str(effective_scratch))}")
+    lines.append(f"export SCRATCH={shlex.quote(str(effective_scratch))}")
     for key, value in cfg.section("environment_extra").items():
         lines.append(f"export {key}={shlex.quote(str(value))}")
     return "\n".join(lines)
 
 
-def run_stage(cfg, command: Sequence[str] | str, cwd: Path, log: Path | None = None, check: bool = True):
+def run_stage(
+    cfg,
+    command: Sequence[str] | str,
+    cwd: Path,
+    log: Path | None = None,
+    check: bool = True,
+    scratch: Path | None = None,
+):
     """Run a stage command with the configured site setup script when provided."""
-    env = build_runtime_env(cfg, cwd)
+    env = build_runtime_env(cfg, cwd, scratch=scratch)
     setup = cfg.get("environment.setup_script")
     if setup:
         printable = command if isinstance(command, str) else " ".join(shlex.quote(x) for x in command)
