@@ -20,7 +20,10 @@ def _stage_cwd_and_scratch(cfg, stage: str) -> tuple[Path, Path]:
     if stage == "dft":
         return cfg.dft_dir, cfg.scratch_dir
     if stage == "dmft":
-        return cfg.dmft_dir, cfg.dmft_dir
+        # Reproduce the validated run_dmft PBS convention:
+        #   cd $PBS_O_WORKDIR (= dmft/)
+        #   SCRATCH=$PBS_O_WORKDIR/tmp
+        return cfg.dmft_dir, cfg.dmft_scratch_dir
     if stage in {"maxent", "dos", "band"}:
         return cfg.dmft_dir, cfg.dmft_dir
     raise WorkflowError(f"Unsupported PBS stage: {stage}")
@@ -32,7 +35,7 @@ def render_pbs(cfg, stage: str, force: bool = False) -> str:
     nodes = int(r.get("nodes", 1))
     ppn = int(r.get("ppn", 8))
     walltime = str(r.get("walltime", "04:00:00"))
-    mem = str(r.get("mem", "16gb"))
+    mem = str(r.get("mem", "")).strip()
     queue = r.get("queue")
     py = str(cfg.get("environment.python", "python"))
     repo_root = Path(__file__).resolve().parent.parent
@@ -50,13 +53,15 @@ def render_pbs(cfg, stage: str, force: bool = False) -> str:
     lines = [
         "#!/bin/bash",
         f"#PBS -N {name}",
+        "#PBS -j oe",
         f"#PBS -l nodes={nodes}:ppn={ppn}",
         f"#PBS -l walltime={walltime}",
-        f"#PBS -l mem={mem}",
-        "#PBS -j oe",
     ]
+    if mem:
+        lines.append(f"#PBS -l mem={mem}")
     if queue:
         lines.append(f"#PBS -q {queue}")
+
     lines += [
         "",
         shell_preamble(cfg, cwd, scratch=scratch),
