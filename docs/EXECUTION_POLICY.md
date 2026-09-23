@@ -1,67 +1,53 @@
 # Execution policy: foreground vs PBS
 
-Only two scientific initialization steps are intentionally manual:
+Only two scientific initialization steps are intentionally manual, and both are performed in the complete DFT directory:
 
 ```text
-PROJECT/dft  : init_lapw
-PROJECT/dmft : init_dmft.py
+PROJECT/dft : init_lapw      # before DFT
+PROJECT/dft : init_dmft.py   # after DFT convergence
 ```
 
 Everything else is script-driven. The distinction below is about **where the script runs**, not whether it is automated.
 
 ## Foreground: fast bookkeeping / validation / plotting
 
-These tasks should normally run directly in the login shell because they finish quickly and gain nothing from MPI:
+These tasks normally run directly in the login shell:
 
 ```bash
-edmft-workflow -c config.toml init-layout
-edmft-workflow -c config.toml doctor-env
-edmft-workflow -c config.toml prepare-dmft
-edmft-workflow -c config.toml doctor
-edmft-workflow -c config.toml check
-edmft-workflow -c config.toml run plots
+python /path/to/workflow.py -c config.toml init-layout
+python /path/to/workflow.py -c config.toml doctor-env
+python /path/to/workflow.py -c config.toml prepare-dmft
+python /path/to/workflow.py -c config.toml doctor
+python /path/to/workflow.py -c config.toml check
+python /path/to/workflow.py -c config.toml run plots
 ```
 
-They perform directory creation, file copying, parsing, sanity checks or headless Matplotlib plotting. Starting MPI ranks for these operations would add overhead without numerical speedup.
+`prepare-dmft` is bookkeeping rather than a heavy numerical stage: it copies the initialized DFT snapshot, supplements files omitted by `dmft_copy.py`, writes `params.dat`, and runs the short `szero.py` initialization.
 
 ## PBS: numerical compute stages
-
-Production numerical stages should be submitted to PBS/Torque:
 
 | Stage | Normal command | Parallel mechanism |
 |---|---|---|
 | DFT SCF | `submit dft` | WIEN2k `run_lapw -p` + `.machines` |
-| charge-self-consistent DMFT | `submit dmft` | `.machines` for WIEN2k + `mpi_prefix.dat(.2)` for eDMFT |
-| MaxEnt | `submit maxent` | explicit `mpirun -np N python maxent_run.py ...` |
-| real-axis DOS | `submit dos` | `mpi_prefix.dat(.2)` consumed by `x_dmft.py lapw1/dmft1` |
-| band spectral function | `submit band` | `mpi_prefix.dat(.2)` consumed by `x_dmft.py lapw1 --band/dmftp` |
+| charge-self-consistent DMFT | `submit dmft` | `mpi_prefix.dat(.2)` for eDMFT; optional WIEN2k `.machines` |
+| MaxEnt | `submit maxent` | explicit MPI launch |
+| real-axis DOS | `submit dos` | `mpi_prefix.dat(.2)` consumed by `x_dmft.py` |
+| band spectral function | `submit band` | `mpi_prefix.dat(.2)` consumed by `x_dmft.py` |
 
-The complete production post-processing compute chain is:
-
-```bash
-edmft-workflow -c config.toml submit post
-```
-
-which submits:
+The complete numerical post-processing chain is:
 
 ```text
 maxent --afterok--> dos --afterok--> band
 ```
 
-After the band job finishes, plotting is deliberately kept out of PBS:
-
-```bash
-edmft-workflow -c config.toml run plots
-```
+Plotting stays in the foreground after those jobs complete.
 
 ## MPI rank selection
 
-PBS allocations are read from `PBS_NODEFILE`. In configuration:
+`"allocation"` means use the PBS allocation read from `PBS_NODEFILE`:
 
 ```toml
 [parallel]
-mpi_launcher = "mpirun"
-mpi_np_flag = "-np"
 dft_ranks = "allocation"
 dmft_ranks = "allocation"
 maxent_ranks = "allocation"
@@ -69,42 +55,29 @@ dos_ranks = "allocation"
 band_ranks = "allocation"
 ```
 
-`allocation` means use the number of PBS slots. A fixed integer can cap a particular stage.
+WIEN2k DFT parallelism is controlled by `.machines` plus `run_lapw -p`, not by simply prefixing `run_lapw` with `mpirun`. On the validated single-node cluster setup, `wien_machines_mode = "single_node_compact"` reproduces:
 
-MaxEnt additionally caps the number of ranks to the number of active bath/self-energy channels, because extra MPI ranks would have no work.
-
-WIEN2k k-point parallelism is not implemented by simply prefixing `run_lapw` with `mpirun`. The workflow generates `.machines` and uses WIEN2k's `-p` mechanism. Haule's `createW2kmachinef.py` is used to distribute the allocated PBS hosts over the available k points.
-
-## One authoritative runtime environment
-
-Every numerical command, whether debugged in the foreground or run under PBS, sources the same file configured by:
-
-```toml
-[environment]
-setup_script = "/home/USER/.config/edmft_workflow/env.sh"
+```text
+1:<host>:<NP>
+granularity:1
+extrafine:1
 ```
 
-That file should initialize **Intel compiler + Intel MPI + MKL**, then add WIEN2k, eDMFT, FFTW and the Python/conda environment. This prevents the common situation in which an interactive shell works but a PBS node cannot find `libmkl_intel_lp64.so`, `libmkl_intel_thread.so`, or `libmkl_core.so`.
+## Config-only runtime environment
 
-Before the first production submission, run:
+No external `env.sh` is required. The project config records the Intel compiler/MPI/MKL, FFTW, WIEN2k, eDMFT and Python installation locations. The workflow constructs the corresponding runtime environment inside foreground subprocesses and generated PBS jobs.
+
+Before expensive submissions:
 
 ```bash
-edmft-workflow -c config.toml doctor-env
+python /path/to/workflow.py -c config.toml doctor-env
 ```
 
-Every generated PBS script also runs this preflight before starting the expensive calculation. It checks:
-
-- `WIENROOT` and `WIEN_DMFT_ROOT`;
-- which `mpirun` is being used and its version;
-- `mpi4py` and the MPI library it reports;
-- dynamic linking of `ctqmc`, `dmft`, and `dmft2`;
-- direct loading of the three Intel MKL shared libraries above.
-
-A failed runtime preflight stops the PBS job before expensive work begins.
+The generated PBS script runs the same preflight before starting numerical work.
 
 ## `dmft_copy.py` rule
 
-`dmft_copy.py SOURCE` always copies files **from SOURCE into the current working directory**. The workflow follows this literally:
+`dmft_copy.py SOURCE` copies files **from SOURCE into the current working directory**:
 
 ```text
 cwd = PROJECT/dmft
@@ -117,13 +90,13 @@ cwd = PROJECT/dmft/band
     dmft_copy.py PROJECT/dmft/onreal
 ```
 
-Do not reverse the argument/cwd semantics.
+For the initial `dft -> dmft` snapshot, the workflow additionally copies `case.indmf`, `case.vsp/case.vns`, and spin-polarized potential variants when present. These mutable numerical files are copied, not symlinked. `DFT_SOURCE -> ../dft` is provenance only.
 
 ## Recommended production sequence
 
 ```bash
 # once per material
-edmft-workflow -c config.toml init-layout
+python /path/to/workflow.py -c config.toml init-layout
 
 # manual checkpoint 1
 cd PROJECT/dft
@@ -131,24 +104,22 @@ export SCRATCH="$PWD/tmp"
 init_lapw
 
 # heavy DFT
-edmft-workflow -c config.toml doctor-env
-edmft-workflow -c config.toml submit dft
+python /path/to/workflow.py -c PROJECT/config.toml doctor-env
+python /path/to/workflow.py -c PROJECT/config.toml submit dft
 
-# after DFT completes
-edmft-workflow -c config.toml prepare-dmft
-
-# manual checkpoint 2
-cd PROJECT/dmft
+# manual checkpoint 2, still in the converged DFT directory
+cd PROJECT/dft
 init_dmft.py
-# inspect/edit indmf*, indmfl, indmfi and params.dat
+# inspect/edit case.indmf, case.indmfl, case.indmfi
+
+# automated isolated snapshot + params.dat + initial sig.inp
+python /path/to/workflow.py -c PROJECT/config.toml prepare-dmft
 
 # heavy CSC DFT+DMFT
-edmft-workflow -c config.toml submit dmft
+python /path/to/workflow.py -c PROJECT/config.toml submit dmft
 
-# after DMFT completes
-edmft-workflow -c config.toml check
-edmft-workflow -c config.toml submit post
-
-# after post chain completes
-edmft-workflow -c config.toml run plots
+# post-processing
+python /path/to/workflow.py -c PROJECT/config.toml check
+python /path/to/workflow.py -c PROJECT/config.toml submit post
+python /path/to/workflow.py -c PROJECT/config.toml run plots
 ```
