@@ -18,6 +18,7 @@ Recommended layout:
 │   ├── dft/
 │   │   └── tmp/
 │   └── dmft/
+│       ├── DFT_SOURCE -> ../dft
 │       ├── tmp/
 │       ├── maxent/
 │       ├── onreal/
@@ -69,28 +70,33 @@ any working directory.
 The git repository contains workflow code and documentation only. Do not put
 WIEN2k/eDMFT outputs in the repository.
 
-Each material has one calculation root. `project.root_dir` points to it and the
-workflow uses the fixed layout:
+A project-local config can use:
 
-```text
-root_dir/dft
-root_dir/dft/tmp
-root_dir/dmft
-root_dir/dmft/tmp
-root_dir/dmft/maxent
-root_dir/dmft/onreal
-root_dir/dmft/band
-root_dir/dmft/results
+```toml
+[project]
+root_dir = "."
+scratch_dir = "dft/tmp"
+dmft_scratch_dir = "dmft/tmp"
 ```
 
-The two intentionally manual scientific initialization steps are:
+so moving/copying the whole calculation directory does not require editing an
+absolute project path.
+
+The two intentionally manual scientific initialization steps are both performed
+in the full DFT working directory:
 
 ```text
-root_dir/dft  : init_lapw
-root_dir/dmft : init_dmft.py
+root_dir/dft : init_lapw      # before DFT
+root_dir/dft : init_dmft.py   # after DFT convergence
 ```
 
-Everything else is script-driven.
+Then `prepare-dmft` creates the isolated `dmft/` snapshot, generates
+`params.dat` and the starting `sig.inp`, and `run_dmft.py` executes only in
+`dmft/`.
+
+`DFT_SOURCE -> ../dft` is a provenance link only. Mutable WIEN2k state used by
+charge-self-consistent DMFT is copied locally into `dmft/`; it is not symlinked
+back to the pristine DFT baseline.
 
 ## Updating the workflow
 
