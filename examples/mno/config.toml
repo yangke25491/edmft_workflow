@@ -1,15 +1,21 @@
-# MnO example for the fixed project layout.
+# MnO example matching the validated PBS scripts on the target cluster.
+
 [project]
 case = "01"
 root_dir = "/home/kyang/test/DMFT/MnO"
 scratch_dir = "/home/kyang/test/DMFT/MnO/dft/tmp"
+dmft_scratch_dir = "/home/kyang/test/DMFT/MnO/dmft/tmp"
 
 [environment]
 wienroot = "/home/kyang/apps/edmft/wien2k"
 edmft_root = "/home/kyang/apps/edmft/eDMFT/bin"
 python = "/home/kyang/miniforge3/envs/edmft/bin/python"
 python_bin_dir = "/home/kyang/miniforge3/envs/edmft/bin"
-setup_script = "/home/kyang/.config/edmft_workflow/env.sh"
+intel_root = "/opt/intel2019/compilers_and_libraries_2019.4.243"
+intel_arch = "intel64"
+fftw_lib = "/opt/fftw-3.3.10/lib"
+ulimit_stack = "unlimited"
+ulimit_core = "unlimited"
 
 [environment_extra]
 OMP_NUM_THREADS = "1"
@@ -18,27 +24,31 @@ I_MPI_HYDRA_BOOTSTRAP = "ssh"
 I_MPI_FABRICS = "shm"
 
 [parallel]
-mpi_launcher = "mpirun"
+mpi_launcher = "/opt/intel2019/compilers_and_libraries_2019.4.243/linux/mpi/intel64/bin/mpirun"
 mpi_np_flag = "-np"
 mpi_extra_args = []
 write_mpi_prefix2 = true
-foreground_ranks = 4
+foreground_ranks = 1
 dft_ranks = "allocation"
 dmft_ranks = "allocation"
 maxent_ranks = "allocation"
 dos_ranks = "allocation"
 band_ranks = "allocation"
-dmft_wien_machines = true
+wien_machines_mode = "single_node_compact"
+dmft_wien_machines = false
 
 [commands]
-dmft_copy = "dmft_copy.py"
-saverage = "saverage.py"
-maxent = "maxent_run.py"
-x_dmft = "x_dmft.py"
-wien_x = "x"
+dmft_copy = "/home/kyang/apps/edmft/eDMFT/bin/dmft_copy.py"
+saverage = "/home/kyang/apps/edmft/eDMFT/bin/saverage.py"
+maxent = "/home/kyang/apps/edmft/eDMFT/bin/maxent_run.py"
+x_dmft = "/home/kyang/apps/edmft/eDMFT/bin/x_dmft.py"
+wien_x = "/home/kyang/apps/edmft/wien2k/x"
 
 [dft]
-run_command = "run_lapw -ec 0.0001 -cc 0.0001"
+run_command = "/home/kyang/apps/edmft/wien2k/run_lapw -p -cc 0.0001 -ec 0.0001 -i 100"
+
+[dmft]
+run_command = "/home/kyang/miniforge3/envs/edmft/bin/python /home/kyang/apps/edmft/eDMFT/bin/run_dmft.py"
 
 [convergence]
 max_dn = 0.005
@@ -90,31 +100,36 @@ drop_klabels = ["LAMBDA", "DELTA", "Z"]
 qsub = "qsub"
 queue = "batch"
 nodes = 1
-ppn = 8
+ppn = 1
 mem = "16gb"
 walltime = "04:00:00"
 
 [pbs_dft]
+job_name = "MnO"
 ppn = 64
-mem = "220gb"
-walltime = "24:00:00"
+walltime = "9999:00:00"
+mem = ""
 
 [pbs_dmft]
-ppn = 64
-mem = "220gb"
-walltime = "48:00:00"
+job_name = "MnO"
+ppn = 33
+walltime = "220:00:00"
+mem = ""
 
 [pbs_maxent]
+job_name = "MnO_MaxEnt"
 ppn = 8
 mem = "16gb"
 walltime = "04:00:00"
 
 [pbs_dos]
-ppn = 16
+job_name = "MnO_DOS"
+ppn = 20
 mem = "32gb"
 walltime = "04:00:00"
 
 [pbs_band]
-ppn = 16
+job_name = "MnO_BAND"
+ppn = 33
 mem = "32gb"
 walltime = "04:00:00"
