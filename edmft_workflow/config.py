@@ -74,13 +74,26 @@ class WorkflowConfig:
         return str(self.require("project.case"))
 
     @property
+    def root_dir(self) -> Path:
+        return Path(str(self.require("project.root_dir"))).expanduser().resolve()
+
+    @property
+    def dft_dir(self) -> Path:
+        return self.root_dir / "dft"
+
+    @property
     def dmft_dir(self) -> Path:
-        return Path(str(self.require("project.dmft_dir"))).resolve()
+        return self.root_dir / "dmft"
+
+    @property
+    def scratch_dir(self) -> Path:
+        raw = self.get("project.scratch_dir", str(self.dft_dir / "tmp"))
+        return Path(str(raw)).expanduser().resolve()
 
     @property
     def work_root(self) -> Path:
-        raw = self.get("project.work_root", str(self.dmft_dir / "postprocess"))
-        return Path(str(raw)).resolve()
+        # Fixed project layout: post-processing directories live directly under dmft/.
+        return self.dmft_dir
 
 
 def load_config(path: str | Path) -> WorkflowConfig:
@@ -103,9 +116,9 @@ def load_config(path: str | Path) -> WorkflowConfig:
 
 def _validate(cfg: WorkflowConfig) -> None:
     cfg.require("project.case")
-    cfg.require("project.dmft_dir")
-    if not cfg.dmft_dir.exists():
-        raise ConfigError(f"project.dmft_dir does not exist: {cfg.dmft_dir}")
+    cfg.require("project.root_dir")
+    if not cfg.root_dir.exists():
+        raise ConfigError(f"project.root_dir does not exist: {cfg.root_dir}")
     if cfg.get("maxent.average_last", 1) < 1:
         raise ConfigError("maxent.average_last must be >= 1")
     for sec in ("dos", "band"):
