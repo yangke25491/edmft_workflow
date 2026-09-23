@@ -22,7 +22,6 @@ def _stage_cwd_and_scratch(cfg, stage: str) -> tuple[Path, Path]:
     if stage == "dmft":
         return cfg.dmft_dir, cfg.dmft_dir
     if stage in {"maxent", "dos", "band"}:
-        # The stage runner creates/enters dmft/maxent, dmft/onreal or dmft/band.
         return cfg.dmft_dir, cfg.dmft_dir
     raise WorkflowError(f"Unsupported PBS stage: {stage}")
 
@@ -67,7 +66,7 @@ def render_pbs(cfg, stage: str, force: bool = False) -> str:
         f"{cli} doctor-env",
         'echo "PBS_JOBID=${PBS_JOBID:-none}"',
         'echo "PBS_NODEFILE=${PBS_NODEFILE:-none}"',
-        'if [ -n "${PBS_NODEFILE:-}" ] && [ -f "$PBS_NODEFILE" ]; then echo "allocated slots=$(wc -l < \"$PBS_NODEFILE\")"; fi',
+        'if [ -n "${PBS_NODEFILE:-}" ] && [ -f "$PBS_NODEFILE" ]; then slots=$(wc -l < "$PBS_NODEFILE"); echo "allocated slots=$slots"; fi',
         'echo "mpirun=$(command -v mpirun)"',
         'echo "============================================"',
         "",
