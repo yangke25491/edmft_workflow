@@ -9,13 +9,26 @@ wienroot = "/home/kyang/apps/edmft/wien2k"
 edmft_root = "/home/kyang/apps/edmft/eDMFT/bin"
 python = "/home/kyang/miniforge3/envs/edmft/bin/python"
 python_bin_dir = "/home/kyang/miniforge3/envs/edmft/bin"
-# setup_script = "/home/kyang/.config/edmft_workflow/env.sh"
+setup_script = "/home/kyang/.config/edmft_workflow/env.sh"
 
 [environment_extra]
 OMP_NUM_THREADS = "1"
 MKL_NUM_THREADS = "1"
 I_MPI_HYDRA_BOOTSTRAP = "ssh"
 I_MPI_FABRICS = "shm"
+
+[parallel]
+mpi_launcher = "mpirun"
+mpi_np_flag = "-np"
+mpi_extra_args = []
+write_mpi_prefix2 = true
+foreground_ranks = 4
+dft_ranks = "allocation"
+dmft_ranks = "allocation"
+maxent_ranks = "allocation"
+dos_ranks = "allocation"
+band_ranks = "allocation"
+dmft_wien_machines = true
 
 [commands]
 dmft_copy = "dmft_copy.py"
@@ -79,4 +92,29 @@ queue = "batch"
 nodes = 1
 ppn = 8
 mem = "16gb"
+walltime = "04:00:00"
+
+[pbs_dft]
+ppn = 64
+mem = "220gb"
+walltime = "24:00:00"
+
+[pbs_dmft]
+ppn = 64
+mem = "220gb"
+walltime = "48:00:00"
+
+[pbs_maxent]
+ppn = 8
+mem = "16gb"
+walltime = "04:00:00"
+
+[pbs_dos]
+ppn = 16
+mem = "32gb"
+walltime = "04:00:00"
+
+[pbs_band]
+ppn = 16
+mem = "32gb"
 walltime = "04:00:00"
