@@ -1,8 +1,11 @@
 [project]
 case = "01"
-dmft_dir = "/home/USER/path/to/converged_dmft"
-# All post-processing is created here. Keep this outside the frozen run_dmft.py directory.
-work_root = "/home/USER/path/to/converged_dmft/postprocess"
+# Fixed layout:
+#   root_dir/dft
+#   root_dir/dmft
+root_dir = "/home/USER/path/to/project"
+# Ordinary WIEN2k scratch used by the DFT stage. Default is root_dir/dft/tmp.
+scratch_dir = "/home/USER/path/to/project/dft/tmp"
 
 [environment]
 wienroot = "/home/USER/apps/edmft/wien2k"
@@ -12,7 +15,6 @@ python_bin_dir = "/home/USER/miniforge3/envs/edmft/bin"
 # Optional: source site/compiler/MPI setup before every external command and PBS job.
 # setup_script = "/home/USER/.config/edmft_workflow/env.sh"
 
-# Extra environment values exported by the workflow.
 [environment_extra]
 OMP_NUM_THREADS = "1"
 MKL_NUM_THREADS = "1"
@@ -26,18 +28,24 @@ maxent = "maxent_run.py"
 x_dmft = "x_dmft.py"
 wien_x = "x"
 
+[dft]
+# init_lapw is NOT run by this project. Run it manually inside root_dir/dft first.
+run_command = "run_lapw -ec 0.0001 -cc 0.0001"
+
+[dmft]
+# init_dmft.py is NOT run by this project. Run it manually inside root_dir/dmft first.
+# If omitted, the workflow runs $PYTHON $WIEN_DMFT_ROOT/run_dmft.py.
+# run_command = "/home/USER/miniforge3/envs/edmft/bin/python /home/USER/apps/edmft/eDMFT/bin/run_dmft.py"
+
 [convergence]
-# This is a workflow sanity threshold, not a universal physical law.
 max_dn = 0.005
 outer_drift = 0.005
-# If true, MaxEnt refuses to start when the checks above fail.
 block_postprocess = true
 
 [maxent]
 impurity = 1
 average_last = 5
 
-# Haule MnO tutorial-style defaults. Override per material if needed.
 [maxent_params]
 statistics = "fermi"
 Ntau = 300
@@ -65,9 +73,7 @@ wmax = 1.0
 nomega = 200
 wmin = -6.0
 wmax = 6.0
-# WIEN2k template syntax:
-#   @wien:fcc.klist -> $WIENROOT/SRC_templates/fcc.klist
-# For a custom path, give an absolute path to your own case.klist_band.
+# @wien:fcc.klist -> $WIENROOT/SRC_templates/fcc.klist
 klist_source = "@wien:fcc.klist"
 
 [plot]
@@ -76,11 +82,7 @@ cdos_labels = ["Total DOS", "Mn-d"]
 dos_xmin = -3.0
 dos_xmax = 1.0
 akw_intensity = 0.97
-# Hide line labels if you only want endpoint labels on the final figure.
 drop_klabels = ["LAMBDA", "DELTA", "Z"]
-# Optional display window; omit to use the entire computed real-frequency range.
-# akw_ymin = -6.0
-# akw_ymax = 6.0
 
 [pbs]
 qsub = "qsub"
@@ -89,6 +91,16 @@ nodes = 1
 ppn = 8
 mem = "16gb"
 walltime = "04:00:00"
+
+[pbs_dft]
+ppn = 64
+mem = "200gb"
+walltime = "24:00:00"
+
+[pbs_dmft]
+ppn = 64
+mem = "200gb"
+walltime = "48:00:00"
 
 [pbs_maxent]
 ppn = 8
