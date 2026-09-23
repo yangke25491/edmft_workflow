@@ -5,6 +5,7 @@ import re
 import shutil
 
 from .checks import validate_band_outputs
+from .parallel import write_edmft_mpi_prefix
 from .utils import (
     WorkflowError, copy_case_files, count_klist_points, patch_indmfl, require_file,
     run_stage, safe_prepare_dir,
@@ -23,8 +24,7 @@ def resolve_klist_source(cfg) -> Path:
 
 def _copy_wien_potentials(cfg, out: Path) -> None:
     case = cfg.case
-    # x_dmft.py lapw1 --band needs the WIEN2k potential files in the working
-    # directory.  Do not rely on dmft_copy.py or on the parent directory.
+    # x_dmft.py lapw1 --band needs the converged WIEN2k potential locally.
     copy_case_files(cfg.dmft_dir, out, case, ["vsp", "vns"], required=True)
     copy_case_files(
         cfg.dmft_dir, out, case,
@@ -39,6 +39,8 @@ def prepare_band(cfg, force: bool = False) -> Path:
         raise WorkflowError("Real-axis DOS directory does not exist. Run the DOS stage first.")
     out = safe_prepare_dir(cfg.dmft_dir / "band", force=force)
     dmft_copy = str(cfg.get("commands.dmft_copy", "dmft_copy.py"))
+
+    # dmft_copy.py copies FROM its positional argument INTO cwd.
     run_stage(cfg, [dmft_copy, str(source)], cwd=out, log=out / "dmft_copy.log")
     _copy_wien_potentials(cfg, out)
 
@@ -77,6 +79,11 @@ def run_band(cfg, force: bool = False) -> Path:
     xdmft = str(cfg.get("commands.x_dmft", "x_dmft.py"))
     expected = count_klist_points(out / f"{case}.klist_band")
 
+    # Haule's x_dmft.py consumes mpi_prefix.dat / mpi_prefix.dat2 from cwd.
+    # This turns both lapw1 --band and dmftp into MPI jobs when the installed
+    # eDMFT executable supports it.
+    write_edmft_mpi_prefix(cfg, out, "band")
+
     for name in [f"{case}.vector", f"{case}.energy", "eigvals.dat"]:
         p = out / name
         if p.exists():
@@ -94,7 +101,7 @@ def run_band(cfg, force: bool = False) -> Path:
 
     finished = _max_finished_kpoint(out / "dmftp.log")
     # Some eDMFT builds print only a subset of progress messages. Treat this as
-    # advisory; the authoritative checks are outputdmfp + eigvals block count.
+    # advisory; outputdmfp + eigvals block count are authoritative.
     if finished is not None and finished != expected:
         print(
             f"WARNING: dmftp progress log stopped at k={finished}, expected {expected}; "
