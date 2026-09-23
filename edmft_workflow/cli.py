@@ -18,14 +18,23 @@ from .pbs import submit_pbs, write_pbs
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="edmft-workflow",
-        description="Automate WIEN2k + Haule eDMFT around two manual checkpoints: init_lapw and init_dmft.py.",
+        description=(
+            "Automate WIEN2k + Haule eDMFT around two manual checkpoints, both in dft/: "
+            "init_lapw before DFT and init_dmft.py after DFT convergence."
+        ),
     )
     p.add_argument("-c", "--config", default="config.toml", help="Path to TOML configuration")
     sub = p.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("init-layout", help="Create fixed root/dft and root/dmft directories; does NOT run init_lapw")
+    sub.add_parser("init-layout", help="Create root/dft, root/dmft and DFT scratch; does not run initializers")
 
-    prepdmft = sub.add_parser("prepare-dmft", help="Copy converged DFT files into dmft/; does NOT run init_dmft.py")
+    prepdmft = sub.add_parser(
+        "prepare-dmft",
+        help=(
+            "After converged DFT + manual init_dmft.py in dft/, create an isolated dmft/ snapshot, "
+            "generate params.dat and initial sig.inp"
+        ),
+    )
     prepdmft.add_argument("--force", action="store_true")
 
     sub.add_parser("doctor-env", help="Check Intel MPI, mpi4py, MKL and eDMFT shared-library runtime")
@@ -37,7 +46,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Run a stage in the current shell/job. Production compute stages are normally submitted through PBS.",
     )
     runp.add_argument("stage", choices=["dft", "dmft", "maxent", "dos", "band", "plots", "post", "all"])
-    runp.add_argument("--force", action="store_true", help="Back up/recreate post-processing stage directories when supported")
+    runp.add_argument("--force", action="store_true", help="Back up/recreate stage directories when supported")
 
     prep = sub.add_parser("pbs", help="Write a PBS compute script without submitting it")
     prep.add_argument("stage", choices=["dft", "dmft", "maxent", "dos", "band"])
@@ -50,8 +59,6 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _run_stage(cfg, stage: str, force: bool) -> None:
-    # Numerical stages intentionally do not plot. Plotting is a fast, headless
-    # foreground task (`run plots`) and should not waste an allocated PBS node.
     if stage == "dft":
         run_dft(cfg)
     elif stage == "dmft":
@@ -67,14 +74,14 @@ def _run_stage(cfg, stage: str, force: bool) -> None:
         plot_dos(cfg)
         plot_akw(cfg)
     elif stage == "post":
-        # Foreground/debug convenience only. For production use `submit post`.
         run_maxent(cfg, force=force)
         run_dos(cfg, force=force)
         run_band(cfg, force=force)
     elif stage == "all":
         raise WorkflowError(
             "'run all' is intentionally disabled because init_lapw and init_dmft.py are manual checkpoints. "
-            "Use submit dft, then prepare-dmft + manual init_dmft.py, then submit dmft, then submit post."
+            "Use: init_lapw in dft/ -> submit dft -> init_dmft.py in dft/ -> prepare-dmft -> "
+            "submit dmft -> submit post."
         )
 
 
@@ -126,7 +133,7 @@ def main(argv=None) -> int:
             j2 = submit_pbs(cfg, "dos", force=args.force, depends_on=j1)
             j3 = submit_pbs(cfg, "band", force=args.force, depends_on=j2)
             print(f"post compute chain: maxent={j1} -> dos={j2} -> band={j3}")
-            print("After the band job finishes, run `edmft-workflow -c config.toml run plots` in the foreground.")
+            print("After the band job finishes, run `workflow.py -c config.toml run plots` in the foreground.")
             return 0
 
         return 1
