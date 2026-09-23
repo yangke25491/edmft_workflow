@@ -92,7 +92,6 @@ class WorkflowConfig:
 
     @property
     def work_root(self) -> Path:
-        # Fixed project layout: post-processing directories live directly under dmft/.
         return self.dmft_dir
 
 
@@ -115,10 +114,11 @@ def load_config(path: str | Path) -> WorkflowConfig:
 
 
 def _validate(cfg: WorkflowConfig) -> None:
+    # Do not require root_dir to exist here: `init-layout` is precisely the
+    # command that creates it. Stage-specific runners validate the files/dirs
+    # they actually need before launching expensive work.
     cfg.require("project.case")
     cfg.require("project.root_dir")
-    if not cfg.root_dir.exists():
-        raise ConfigError(f"project.root_dir does not exist: {cfg.root_dir}")
     if cfg.get("maxent.average_last", 1) < 1:
         raise ConfigError("maxent.average_last must be >= 1")
     for sec in ("dos", "band"):
