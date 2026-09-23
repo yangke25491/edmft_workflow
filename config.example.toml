@@ -4,7 +4,7 @@ case = "01"
 #   root_dir/dft
 #   root_dir/dmft
 root_dir = "/home/USER/path/to/project"
-# Ordinary WIEN2k scratch used by the DFT stage. Default is root_dir/dft/tmp.
+# Ordinary WIEN2k scratch. Default convention: root_dir/dft/tmp.
 scratch_dir = "/home/USER/path/to/project/dft/tmp"
 
 [environment]
@@ -12,14 +12,34 @@ wienroot = "/home/USER/apps/edmft/wien2k"
 edmft_root = "/home/USER/apps/edmft/eDMFT/bin"
 python = "/home/USER/miniforge3/envs/edmft/bin/python"
 python_bin_dir = "/home/USER/miniforge3/envs/edmft/bin"
-# Optional: source site/compiler/MPI setup before every external command and PBS job.
-# setup_script = "/home/USER/.config/edmft_workflow/env.sh"
+# Strongly recommended. This one script is sourced by foreground numerical
+# commands AND every generated PBS job. Put Intel compiler/MPI/MKL/FFTW and
+# conda/Python setup here.
+setup_script = "/home/USER/.config/edmft_workflow/env.sh"
 
 [environment_extra]
 OMP_NUM_THREADS = "1"
 MKL_NUM_THREADS = "1"
 I_MPI_HYDRA_BOOTSTRAP = "ssh"
 I_MPI_FABRICS = "shm"
+
+[parallel]
+# Numerical stages use MPI. Pure copying/checking/plotting is intentionally
+# serial because MPI provides no benefit there.
+mpi_launcher = "mpirun"
+mpi_np_flag = "-np"
+mpi_extra_args = []
+write_mpi_prefix2 = true
+# Only used when deliberately debugging a numerical stage outside PBS.
+foreground_ranks = 4
+# "allocation" means use the PBS allocation. Integers can cap a stage.
+dft_ranks = "allocation"
+dmft_ranks = "allocation"
+maxent_ranks = "allocation"
+dos_ranks = "allocation"
+band_ranks = "allocation"
+# run_dmft.py also needs WIEN2k's .machines mechanism for LAPW sections.
+dmft_wien_machines = true
 
 [commands]
 dmft_copy = "dmft_copy.py"
@@ -29,12 +49,12 @@ x_dmft = "x_dmft.py"
 wien_x = "x"
 
 [dft]
-# init_lapw is NOT run by this project. Run it manually inside root_dir/dft first.
+# MANUAL checkpoint before this stage: run init_lapw in root_dir/dft.
 run_command = "run_lapw -ec 0.0001 -cc 0.0001"
 
 [dmft]
-# init_dmft.py is NOT run by this project. Run it manually inside root_dir/dmft first.
-# If omitted, the workflow runs $PYTHON $WIEN_DMFT_ROOT/run_dmft.py.
+# MANUAL checkpoint before this stage: run init_dmft.py in root_dir/dmft.
+# If omitted, workflow runs $PYTHON $WIEN_DMFT_ROOT/run_dmft.py.
 # run_command = "/home/USER/miniforge3/envs/edmft/bin/python /home/USER/apps/edmft/eDMFT/bin/run_dmft.py"
 
 [convergence]
@@ -84,6 +104,8 @@ dos_xmax = 1.0
 akw_intensity = 0.97
 drop_klabels = ["LAMBDA", "DELTA", "Z"]
 
+# Production compute stages go to PBS. Fast bookkeeping, validation and plots
+# stay in the foreground.
 [pbs]
 qsub = "qsub"
 queue = "batch"
@@ -94,12 +116,12 @@ walltime = "04:00:00"
 
 [pbs_dft]
 ppn = 64
-mem = "200gb"
+mem = "220gb"
 walltime = "24:00:00"
 
 [pbs_dmft]
 ppn = 64
-mem = "200gb"
+mem = "220gb"
 walltime = "48:00:00"
 
 [pbs_maxent]
@@ -108,11 +130,11 @@ mem = "16gb"
 walltime = "04:00:00"
 
 [pbs_dos]
-ppn = 8
-mem = "16gb"
+ppn = 16
+mem = "32gb"
 walltime = "04:00:00"
 
 [pbs_band]
-ppn = 8
-mem = "16gb"
+ppn = 16
+mem = "32gb"
 walltime = "04:00:00"
