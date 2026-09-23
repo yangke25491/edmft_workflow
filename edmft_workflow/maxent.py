@@ -6,6 +6,7 @@ import shutil
 import numpy as np
 
 from .checks import convergence_report, format_convergence
+from .parallel import mpi_launch_tokens, stage_ranks
 from .utils import WorkflowError, require_file, safe_prepare_dir, run_stage
 
 
@@ -90,19 +91,40 @@ def prepare_maxent(cfg, force: bool = False) -> Path:
     return out
 
 
+def _active_baths(sig_average: Path) -> int:
+    """Mirror upstream maxent_run.py's count of non-zero complex bath channels."""
+    data = np.loadtxt(sig_average, comments="#")
+    if data.ndim != 2 or data.shape[1] < 3:
+        raise WorkflowError(f"Unexpected Sig.average shape: {data.shape}")
+    # column 0 is omega; every physical bath occupies a Re/Im pair.
+    active_rows = 0
+    for col in range(1, data.shape[1]):
+        if np.sum(np.abs(data[:, col])) > 0:
+            active_rows += 1
+    return max(1, active_rows // 2)
+
+
 def run_maxent(cfg, force: bool = False) -> Path:
     out = prepare_maxent(cfg, force=force)
     savg = str(cfg.get("commands.saverage", "saverage.py"))
     maxent = str(cfg.get("commands.maxent", "maxent_run.py"))
     files = sorted(out.glob("sig.inp.*.*"), key=lambda p: p.name)
-    run_stage(cfg, [savg, *[p.name for p in files], "-o", "Sig.average"], cwd=out,
-              log=out / "saverage.log")
-    require_file(out / "Sig.average")
-    python = cfg.get("environment.python")
-    if python:
-        cmd = [str(python), maxent, "Sig.average"]
-    else:
-        cmd = [maxent, "Sig.average"]
+
+    # saverage is fast bookkeeping; the expensive MaximumEntropy calls below
+    # are distributed by maxent_run.py over MPI.COMM_WORLD.
+    run_stage(
+        cfg,
+        [savg, *[p.name for p in files], "-o", "Sig.average"],
+        cwd=out,
+        log=out / "saverage.log",
+    )
+    sigavg = require_file(out / "Sig.average")
+    nb = _active_baths(sigavg)
+
+    py = str(cfg.get("environment.python", "python"))
+    ranks = stage_ranks(cfg, "maxent", upper_bound=nb)
+    cmd = [*mpi_launch_tokens(cfg, ranks), py, maxent, "Sig.average"]
+    print(f"MaxEnt active baths={nb}; launching {ranks} MPI rank(s)")
     run_stage(cfg, cmd, cwd=out, log=out / "maxent.log")
     require_file(out / "Sig.out")
     print(f"MaxEnt complete: {out / 'Sig.out'}")
