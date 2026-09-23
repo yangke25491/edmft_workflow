@@ -1,7 +1,7 @@
 # Run directly from a git clone (no pip install)
 
-The workflow repository and the scientific calculations should be kept separate.
-A single clone can drive many material calculations.
+The workflow repository and scientific calculations are kept separate. A single
+clone can drive many material calculations.
 
 Recommended layout:
 
@@ -14,86 +14,91 @@ Recommended layout:
 
 /home/kyang/test/DMFT/
 ├── MnO/
-│   ├── config.toml              # configuration for this calculation
+│   ├── config.toml              # complete per-calculation configuration
 │   ├── dft/
+│   │   └── tmp/
 │   └── dmft/
+│       ├── tmp/
 │       ├── maxent/
 │       ├── onreal/
-│       └── band/
+│       ├── band/
+│       └── results/
 └── La3Ni2O7/
     ├── config.toml
     ├── dft/
     └── dmft/
-
-/home/kyang/.config/edmft_workflow/
-└── env.sh                       # Intel/MPI/MKL/WIEN2k/eDMFT environment
 ```
 
-No `pip install -e .` is required. Run the repository launcher explicitly with
-the Python interpreter from the eDMFT environment:
+No `pip install`, alias, shell export, `.bashrc` modification, or separate
+`env.sh` is required for validation. `config.toml` contains the Intel compiler,
+Intel MPI, MKL/FFTW, WIEN2k, eDMFT and Python locations. The workflow generates
+the runtime shell setup for foreground subprocesses and PBS jobs.
+
+Run the git checkout explicitly:
 
 ```bash
-PY=/home/kyang/miniforge3/envs/edmft/bin/python
-WF=/home/kyang/apps/edmft_workflow/workflow.py
-CFG=/home/kyang/test/DMFT/MnO/config.toml
-
-$PY $WF -c $CFG init-layout
-$PY $WF -c $CFG doctor-env
-$PY $WF -c $CFG submit dft
+/home/kyang/miniforge3/envs/edmft/bin/python \
+/home/kyang/apps/edmft_workflow/workflow.py \
+-c /home/kyang/test/DMFT/MnO/config.toml \
+init-layout
 ```
 
-The launcher inserts the repository root into `sys.path`, therefore the command
-works regardless of the current working directory.
-
-For convenience in an interactive shell, aliases may be defined without
-installing the package:
+Environment preflight:
 
 ```bash
-export EDMFT_WF=/home/kyang/apps/edmft_workflow/workflow.py
-export EDMFT_PY=/home/kyang/miniforge3/envs/edmft/bin/python
-alias ewf='$EDMFT_PY $EDMFT_WF'
+/home/kyang/miniforge3/envs/edmft/bin/python \
+/home/kyang/apps/edmft_workflow/workflow.py \
+-c /home/kyang/test/DMFT/MnO/config.toml \
+doctor-env
 ```
 
-Then, for MnO:
+Generate, but do not submit, a PBS script during validation:
 
 ```bash
-cd /home/kyang/test/DMFT/MnO
-ewf -c config.toml doctor-env
-ewf -c config.toml check
+/home/kyang/miniforge3/envs/edmft/bin/python \
+/home/kyang/apps/edmft_workflow/workflow.py \
+-c /home/kyang/test/DMFT/MnO/config.toml \
+pbs dft
 ```
+
+The launcher inserts the repository root into `sys.path`, so it can be run from
+any working directory.
 
 ## What belongs where
 
-The git repository contains only workflow code and documentation. Do not put
-WIEN2k/DMFT outputs in the repository.
+The git repository contains workflow code and documentation only. Do not put
+WIEN2k/eDMFT outputs in the repository.
 
-Each material/project has its own calculation root. `project.root_dir` points to
-that root. The workflow uses a fixed layout:
+Each material has one calculation root. `project.root_dir` points to it and the
+workflow uses the fixed layout:
 
 ```text
 root_dir/dft
+root_dir/dft/tmp
 root_dir/dmft
-```
-
-and creates post-processing directories under `root_dir/dmft`:
-
-```text
+root_dir/dmft/tmp
 root_dir/dmft/maxent
 root_dir/dmft/onreal
 root_dir/dmft/band
 root_dir/dmft/results
 ```
 
-A per-material `config.toml` should normally live directly in that material's
-calculation root, next to `dft/` and `dmft/`.
+The two intentionally manual scientific initialization steps are:
+
+```text
+root_dir/dft  : init_lapw
+root_dir/dmft : init_dmft.py
+```
+
+Everything else is script-driven.
 
 ## Updating the workflow
 
-Because it is not installed into site-packages, updating is simply:
+Because it is not installed into site-packages:
 
 ```bash
 cd /home/kyang/apps/edmft_workflow
 git pull
 ```
 
-The next invocation of `workflow.py` immediately uses the updated source tree.
+The next direct invocation of `workflow.py` uses the updated source immediately.
