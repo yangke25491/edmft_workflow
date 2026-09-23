@@ -13,8 +13,6 @@ def _wrapped_script(cfg, body: str) -> str:
     if setup:
         lines.append(f"source {shlex.quote(str(setup))}")
     else:
-        # Even without a setup script, export the configured roots so the
-        # diagnostic reflects the same assumptions used by the workflow.
         if cfg.get("environment.wienroot"):
             lines.append(f"export WIENROOT={shlex.quote(str(cfg.get('environment.wienroot')))}")
         if cfg.get("environment.edmft_root"):
@@ -34,12 +32,7 @@ def _run_shell(cfg, body: str) -> tuple[int, str]:
 
 
 def environment_report(cfg) -> list[tuple[str, bool, str]]:
-    """Validate the runtime stack used by PBS and foreground numerical stages.
-
-    The main purpose is to catch the failures already seen in real eDMFT runs:
-    wrong MPI launcher, mpi4py built against another MPI, and unresolved Intel
-    MKL shared libraries in ctqmc/dmft executables.
-    """
+    """Validate the MPI/MKL/Python runtime shared by foreground and PBS jobs."""
     checks: list[tuple[str, bool, str]] = []
 
     setup = cfg.get("environment.setup_script")
@@ -58,9 +51,10 @@ def environment_report(cfg) -> list[tuple[str, bool, str]]:
         checks.append((name, rc == 0, text or "not found"))
 
     py = str(cfg.get("environment.python", "python"))
+    pyq = shlex.quote(py)
     rc, text = _run_shell(
         cfg,
-        f"{shlex.quote(py)} -c 'from mpi4py import MPI; print(MPI.Get_library_version().strip())'",
+        f"{pyq} -c 'from mpi4py import MPI; print(MPI.Get_library_version().strip())'",
     )
     checks.append(("mpi4py", rc == 0, text or "import failed"))
 
@@ -77,11 +71,11 @@ def environment_report(cfg) -> list[tuple[str, bool, str]]:
             detail = "; ".join(missing) if missing else "all shared libraries resolved"
             checks.append((f"ldd {exe}", ok, detail))
 
-    # Explicitly confirm the three MKL libraries that previously caused runtime
-    # failures are visible to the dynamic linker through the configured setup.
+    # Explicit MKL load test: these were the exact libraries that previously
+    # failed at runtime on the cluster.
     rc, text = _run_shell(
         cfg,
-        "python - <<'PY'\n"
+        f"{pyq} - <<'PY'\n"
         "import ctypes\n"
         "libs=['libmkl_intel_lp64.so','libmkl_intel_thread.so','libmkl_core.so']\n"
         "bad=[]\n"
