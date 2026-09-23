@@ -1,10 +1,11 @@
-# MnO example matching the validated PBS scripts on the target cluster.
+# MnO site example. Copy this file into the MnO calculation root before use.
+# Project paths are relative to the location of config.toml.
 
 [project]
 case = "01"
-root_dir = "/home/kyang/test/DMFT/MnO"
-scratch_dir = "/home/kyang/test/DMFT/MnO/dft/tmp"
-dmft_scratch_dir = "/home/kyang/test/DMFT/MnO/dmft/tmp"
+root_dir = "."
+scratch_dir = "dft/tmp"
+dmft_scratch_dir = "dmft/tmp"
 
 [environment]
 wienroot = "/home/kyang/apps/edmft/wien2k"
@@ -38,17 +39,37 @@ wien_machines_mode = "single_node_compact"
 dmft_wien_machines = false
 
 [commands]
-dmft_copy = "/home/kyang/apps/edmft/eDMFT/bin/dmft_copy.py"
-saverage = "/home/kyang/apps/edmft/eDMFT/bin/saverage.py"
-maxent = "/home/kyang/apps/edmft/eDMFT/bin/maxent_run.py"
-x_dmft = "/home/kyang/apps/edmft/eDMFT/bin/x_dmft.py"
-wien_x = "/home/kyang/apps/edmft/wien2k/x"
+dmft_copy = "dmft_copy.py"
+szero = "szero.py"
+saverage = "saverage.py"
+maxent = "maxent_run.py"
+x_dmft = "x_dmft.py"
+wien_x = "x"
 
 [dft]
-run_command = "/home/kyang/apps/edmft/wien2k/run_lapw -p -cc 0.0001 -ec 0.0001 -i 100"
+run_command = "run_lapw -p -cc 0.0001 -ec 0.0001 -i 100"
 
 [dmft]
-run_command = "/home/kyang/miniforge3/envs/edmft/bin/python /home/kyang/apps/edmft/eDMFT/bin/run_dmft.py"
+# Omit run_command to let workflow use environment.python + edmft_root/run_dmft.py.
+
+# Fill these from the already validated MnO params.dat before prepare-dmft.
+[dmft_params]
+solver = "CTQMC"
+DCs = "nominal"
+max_dmft_iterations = 1
+max_lda_iterations = 100
+
+[impurity0]
+# exe = "ctqmc"
+# U = ...
+# J = ...
+# beta = ...
+# nf0 = ...
+# M = ...
+
+[dmft_prepare]
+initial_sigma = "szero"
+szero_args = []
 
 [convergence]
 max_dn = 0.005
@@ -101,7 +122,6 @@ qsub = "qsub"
 queue = "batch"
 nodes = 1
 ppn = 1
-mem = "16gb"
 walltime = "04:00:00"
 
 [pbs_dft]
