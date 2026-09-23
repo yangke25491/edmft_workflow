@@ -87,7 +87,14 @@ class WorkflowConfig:
 
     @property
     def scratch_dir(self) -> Path:
+        """Ordinary WIEN2k DFT scratch."""
         raw = self.get("project.scratch_dir", str(self.dft_dir / "tmp"))
+        return Path(str(raw)).expanduser().resolve()
+
+    @property
+    def dmft_scratch_dir(self) -> Path:
+        """Scratch exported to the charge-self-consistent run_dmft.py PBS job."""
+        raw = self.get("project.dmft_scratch_dir", str(self.dmft_dir / "tmp"))
         return Path(str(raw)).expanduser().resolve()
 
     @property
