@@ -123,12 +123,7 @@ def assert_log_contains(path: Path, marker: str) -> None:
 
 
 def copy_case_files(source: Path, target: Path, case: str, suffixes: Sequence[str], required: bool = True) -> None:
-    """Copy named WIEN2k case files explicitly.
-
-    dmft_copy.py intentionally does not guarantee that every WIEN2k potential file
-    needed by a later LAPW1 invocation is present.  Keeping this explicit avoids
-    hidden dependencies on a parent directory.
-    """
+    """Copy named WIEN2k case files explicitly."""
     target.mkdir(parents=True, exist_ok=True)
     for suffix in suffixes:
         src = source / f"{case}.{suffix}"
@@ -143,57 +138,123 @@ def copy_case_files(source: Path, target: Path, case: str, suffixes: Sequence[st
         shutil.copy2(src, target / src.name)
 
 
+def _python_env_root(cfg) -> Path | None:
+    py = cfg.get("environment.python")
+    if py:
+        p = Path(str(py)).expanduser()
+        if p.is_absolute() and p.parent.name == "bin":
+            return p.parent.parent
+    pybin = cfg.get("environment.python_bin_dir")
+    if pybin:
+        p = Path(str(pybin)).expanduser()
+        if p.name == "bin":
+            return p.parent
+    return None
+
+
 def build_runtime_env(cfg, cwd: Path, scratch: Path | None = None) -> dict[str, str]:
-    # For ordinary WIEN2k DFT runs we explicitly pass dft/tmp.  For Haule's
-    # x_dmft.py/run_dmft.py, current upstream W2kEnvironment uses '.' internally,
-    # so the stage working directory remains the effective eDMFT scratch location.
     effective_scratch = (scratch or cwd).resolve()
     effective_scratch.mkdir(parents=True, exist_ok=True)
     env: dict[str, str] = {"SCRATCH": str(effective_scratch)}
     wienroot = cfg.get("environment.wienroot")
     edmft_root = cfg.get("environment.edmft_root")
     python_dir = cfg.get("environment.python_bin_dir")
-    path_parts = []
     if edmft_root:
-        path_parts.append(str(edmft_root))
         env["WIEN_DMFT_ROOT"] = str(edmft_root)
     if wienroot:
-        path_parts.append(str(wienroot))
         env["WIENROOT"] = str(wienroot)
-    if python_dir:
-        path_parts.append(str(python_dir))
+    path_parts = [str(x) for x in (edmft_root, wienroot, python_dir) if x]
     if path_parts:
         env["PATH"] = ":".join(path_parts + [os.environ.get("PATH", "")])
     if edmft_root:
-        env["PYTHONPATH"] = str(edmft_root) + ":" + os.environ.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = str(edmft_root) + (":" + os.environ.get("PYTHONPATH", "") if os.environ.get("PYTHONPATH") else "")
     for key, value in cfg.section("environment_extra").items():
         env[str(key)] = str(value)
     return env
 
 
 def shell_preamble(cfg, cwd: Path, scratch: Path | None = None) -> str:
+    """Render the complete runtime setup used by both PBS and foreground stages.
+
+    `environment.intel_root` makes an extra env.sh unnecessary.  The generated
+    shell reproduces the tested Intel-2019/MKL/Intel-MPI setup by sourcing
+    `linux/bin/compilervars.sh <intel_arch>` and then explicitly constructing
+    PATH/LD_LIBRARY_PATH/PYTHONPATH from config.
+    """
     effective_scratch = (scratch or cwd).resolve()
-    lines = ["set -euo pipefail", f"cd {shlex.quote(str(cwd))}"]
+    lines = ["set -e", f"cd {shlex.quote(str(cwd))}"]
+
     setup = cfg.get("environment.setup_script")
     if setup:
         lines.append(f"source {shlex.quote(str(setup))}")
+
+    intel_root = cfg.get("environment.intel_root")
+    intel_arch = str(cfg.get("environment.intel_arch", "intel64"))
+    if intel_root:
+        intel = Path(str(intel_root)).expanduser()
+        compilervars = intel / "linux/bin/compilervars.sh"
+        lines.append(f"INTEL={shlex.quote(str(intel))}")
+        lines.append(f"source \"$INTEL/linux/bin/compilervars.sh\" {shlex.quote(intel_arch)}")
+
     wienroot = cfg.get("environment.wienroot")
     edmft_root = cfg.get("environment.edmft_root")
     pybin = cfg.get("environment.python_bin_dir")
+    pyenv = _python_env_root(cfg)
+    fftw_lib = cfg.get("environment.fftw_lib")
+
     if wienroot:
         lines.append(f"export WIENROOT={shlex.quote(str(wienroot))}")
     if edmft_root:
         lines.append(f"export WIEN_DMFT_ROOT={shlex.quote(str(edmft_root))}")
-    path_parts = [p for p in (edmft_root, wienroot, pybin) if p]
-    if path_parts:
-        joined = ":".join(shlex.quote(str(p)) for p in path_parts)
-        lines.append(f"export PATH={joined}:$PATH")
+
+    if intel_root:
+        intel = Path(str(intel_root)).expanduser()
+        path_parts = [
+            edmft_root,
+            wienroot,
+            str(intel / "linux/mpi/intel64/bin"),
+            str(intel / "linux/bin/intel64"),
+            pybin,
+            "/usr/bin",
+            "/bin",
+        ]
+        path_text = ":".join(str(x) for x in path_parts if x)
+        lines.append(f"export PATH={shlex.quote(path_text)}")
+
+        ld_parts = [
+            str(intel / "linux/mkl/lib/intel64"),
+            str(intel / "linux/compiler/lib/intel64_lin"),
+            str(intel / "linux/mpi/intel64/lib/release"),
+            str(intel / "linux/mpi/intel64/lib"),
+        ]
+        if fftw_lib:
+            ld_parts.append(str(fftw_lib))
+        if pyenv:
+            ld_parts.append(str(pyenv / "lib"))
+        ld_text = ":".join(ld_parts)
+        lines.append(f"export LD_LIBRARY_PATH={shlex.quote(ld_text)}:${{LD_LIBRARY_PATH:-}}")
+    else:
+        path_parts = [p for p in (edmft_root, wienroot, pybin) if p]
+        if path_parts:
+            joined = ":".join(str(p) for p in path_parts)
+            lines.append(f"export PATH={shlex.quote(joined)}:$PATH")
+
     if edmft_root:
-        lines.append(f"export PYTHONPATH={shlex.quote(str(edmft_root))}:${{PYTHONPATH:-}}")
-    lines.append("export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}")
-    lines.append("export MKL_NUM_THREADS=${MKL_NUM_THREADS:-1}")
+        lines.append(f"export PYTHONPATH={shlex.quote(str(edmft_root))}${{PYTHONPATH:+:${{PYTHONPATH}}}}")
+
+    stack = cfg.get("environment.ulimit_stack", "unlimited")
+    core = cfg.get("environment.ulimit_core", "unlimited")
+    if stack:
+        lines.append(f"ulimit -s {shlex.quote(str(stack))}")
+    if core:
+        lines.append(f"ulimit -c {shlex.quote(str(core))}")
+
     lines.append(f"mkdir -p {shlex.quote(str(effective_scratch))}")
     lines.append(f"export SCRATCH={shlex.quote(str(effective_scratch))}")
+
+    # Defaults match the confirmed working jobs, while config can override them.
+    lines.append("export OMP_NUM_THREADS=1")
+    lines.append("export MKL_NUM_THREADS=1")
     for key, value in cfg.section("environment_extra").items():
         lines.append(f"export {key}={shlex.quote(str(value))}")
     return "\n".join(lines)
@@ -207,11 +268,12 @@ def run_stage(
     check: bool = True,
     scratch: Path | None = None,
 ):
-    """Run a stage command with the configured site setup script when provided."""
+    """Run a stage with exactly the same configured runtime as generated PBS jobs."""
     env = build_runtime_env(cfg, cwd, scratch=scratch)
     setup = cfg.get("environment.setup_script")
-    if setup:
+    intel_root = cfg.get("environment.intel_root")
+    if setup or intel_root:
         printable = command if isinstance(command, str) else " ".join(shlex.quote(x) for x in command)
-        wrapped = f"source {shlex.quote(str(setup))} && {printable}"
+        wrapped = shell_preamble(cfg, cwd, scratch=scratch) + "\n" + printable
         return run(["bash", "-lc", wrapped], cwd=cwd, env=env, log=log, check=check)
     return run(command, cwd=cwd, env=env, log=log, check=check)
