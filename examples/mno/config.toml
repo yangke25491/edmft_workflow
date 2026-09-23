@@ -1,8 +1,8 @@
-# Example only. Copy this to the project root as config.toml and edit paths.
+# MnO example for the fixed project layout.
 [project]
 case = "01"
-dmft_dir = "/home/kyang/test/DMFT/MnO/02"
-work_root = "/home/kyang/test/DMFT/MnO/02/postprocess"
+root_dir = "/home/kyang/test/DMFT/MnO"
+scratch_dir = "/home/kyang/test/DMFT/MnO/dft/tmp"
 
 [environment]
 wienroot = "/home/kyang/apps/edmft/wien2k"
@@ -23,6 +23,9 @@ saverage = "saverage.py"
 maxent = "maxent_run.py"
 x_dmft = "x_dmft.py"
 wien_x = "x"
+
+[dft]
+run_command = "run_lapw -ec 0.0001 -cc 0.0001"
 
 [convergence]
 max_dn = 0.005
