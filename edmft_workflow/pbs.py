@@ -16,6 +16,20 @@ def _stage_resources(cfg, stage: str) -> dict:
     return out
 
 
+def _stage_cwd_and_scratch(cfg, stage: str) -> tuple[Path, Path]:
+    if stage == "dft":
+        return cfg.dft_dir, cfg.scratch_dir
+    if stage == "dmft":
+        return cfg.dmft_dir, cfg.dmft_dir
+    if stage == "maxent":
+        return cfg.dmft_dir, cfg.dmft_dir
+    if stage == "dos":
+        return cfg.dmft_dir, cfg.dmft_dir
+    if stage == "band":
+        return cfg.dmft_dir, cfg.dmft_dir
+    raise WorkflowError(f"Unsupported PBS stage: {stage}")
+
+
 def render_pbs(cfg, stage: str, force: bool = False) -> str:
     r = _stage_resources(cfg, stage)
     name = str(r.get("job_name", f"{cfg.case}_{stage}"))
@@ -27,11 +41,13 @@ def render_pbs(cfg, stage: str, force: bool = False) -> str:
     py = str(cfg.get("environment.python", "python"))
     repo_root = Path(__file__).resolve().parent.parent
     config_path = cfg.source.resolve()
+    cwd, scratch = _stage_cwd_and_scratch(cfg, stage)
+
     cmd = (
         f"{shlex.quote(py)} -m edmft_workflow.cli "
         f"-c {shlex.quote(str(config_path))} run {stage}"
     )
-    if force:
+    if force and stage in {"maxent", "dos", "band"}:
         cmd += " --force"
 
     lines = [
@@ -46,7 +62,7 @@ def render_pbs(cfg, stage: str, force: bool = False) -> str:
         lines.append(f"#PBS -q {queue}")
     lines += [
         "",
-        shell_preamble(cfg, cfg.dmft_dir),
+        shell_preamble(cfg, cwd, scratch=scratch),
         f"export PYTHONPATH={shlex.quote(str(repo_root))}:${{PYTHONPATH:-}}",
         cmd,
         "",
@@ -55,7 +71,7 @@ def render_pbs(cfg, stage: str, force: bool = False) -> str:
 
 
 def write_pbs(cfg, stage: str, force: bool = False) -> Path:
-    jobdir = cfg.work_root / ".edmft_jobs"
+    jobdir = cfg.dmft_dir / ".edmft_jobs"
     jobdir.mkdir(parents=True, exist_ok=True)
     path = jobdir / f"{stage}.pbs"
     path.write_text(render_pbs(cfg, stage, force=force), encoding="utf-8")
