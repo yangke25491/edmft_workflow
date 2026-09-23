@@ -21,11 +21,8 @@ def _stage_cwd_and_scratch(cfg, stage: str) -> tuple[Path, Path]:
         return cfg.dft_dir, cfg.scratch_dir
     if stage == "dmft":
         return cfg.dmft_dir, cfg.dmft_dir
-    if stage == "maxent":
-        return cfg.dmft_dir, cfg.dmft_dir
-    if stage == "dos":
-        return cfg.dmft_dir, cfg.dmft_dir
-    if stage == "band":
+    if stage in {"maxent", "dos", "band"}:
+        # The stage runner creates/enters dmft/maxent, dmft/onreal or dmft/band.
         return cfg.dmft_dir, cfg.dmft_dir
     raise WorkflowError(f"Unsupported PBS stage: {stage}")
 
@@ -43,10 +40,11 @@ def render_pbs(cfg, stage: str, force: bool = False) -> str:
     config_path = cfg.source.resolve()
     cwd, scratch = _stage_cwd_and_scratch(cfg, stage)
 
-    cmd = (
+    cli = (
         f"{shlex.quote(py)} -m edmft_workflow.cli "
-        f"-c {shlex.quote(str(config_path))} run {stage}"
+        f"-c {shlex.quote(str(config_path))}"
     )
+    cmd = f"{cli} run {stage}"
     if force and stage in {"maxent", "dos", "band"}:
         cmd += " --force"
 
@@ -64,6 +62,15 @@ def render_pbs(cfg, stage: str, force: bool = False) -> str:
         "",
         shell_preamble(cfg, cwd, scratch=scratch),
         f"export PYTHONPATH={shlex.quote(str(repo_root))}:${{PYTHONPATH:-}}",
+        "",
+        'echo "===== edmft_workflow runtime preflight ====="',
+        f"{cli} doctor-env",
+        'echo "PBS_JOBID=${PBS_JOBID:-none}"',
+        'echo "PBS_NODEFILE=${PBS_NODEFILE:-none}"',
+        'if [ -n "${PBS_NODEFILE:-}" ] && [ -f "$PBS_NODEFILE" ]; then echo "allocated slots=$(wc -l < \"$PBS_NODEFILE\")"; fi',
+        'echo "mpirun=$(command -v mpirun)"',
+        'echo "============================================"',
+        "",
         cmd,
         "",
     ]
