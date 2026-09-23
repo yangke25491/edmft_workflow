@@ -4,19 +4,32 @@ from pathlib import Path
 import shutil
 
 from .utils import (
-    WorkflowError, patch_indmfl, require_file,
+    WorkflowError, copy_case_files, patch_indmfl, require_file,
     run_stage, safe_prepare_dir,
 )
+
+
+def _copy_wien_potentials(cfg, out: Path) -> None:
+    """Make the post-processing directory independent of its parent directory."""
+    case = cfg.case
+    # LAPW1/DMFT need these potentials locally. dmft_copy.py does not reliably
+    # carry them into every post-processing directory.
+    copy_case_files(cfg.dmft_dir, out, case, ["vsp", "vns"], required=True)
+    copy_case_files(
+        cfg.dmft_dir, out, case,
+        ["vspup", "vspdn", "vnsup", "vnsdn"], required=False,
+    )
 
 
 def prepare_dos(cfg, force: bool = False) -> Path:
     case = cfg.case
     source = cfg.dmft_dir
-    out = safe_prepare_dir(cfg.work_root / "onreal", force=force)
+    out = safe_prepare_dir(cfg.dmft_dir / "onreal", force=force)
     dmft_copy = str(cfg.get("commands.dmft_copy", "dmft_copy.py"))
     run_stage(cfg, [dmft_copy, str(source)], cwd=out, log=out / "dmft_copy.log")
+    _copy_wien_potentials(cfg, out)
 
-    sig = cfg.work_root / "maxent" / "Sig.out"
+    sig = cfg.dmft_dir / "maxent" / "Sig.out"
     require_file(sig)
     shutil.copy2(sig, out / "sig.inp")
 
