@@ -12,10 +12,12 @@ def init_layout(cfg) -> None:
     cfg.dft_dir.mkdir(parents=True, exist_ok=True)
     cfg.dmft_dir.mkdir(parents=True, exist_ok=True)
     cfg.scratch_dir.mkdir(parents=True, exist_ok=True)
+    cfg.dmft_scratch_dir.mkdir(parents=True, exist_ok=True)
     print(f"project root : {cfg.root_dir}")
     print(f"DFT dir      : {cfg.dft_dir}")
     print(f"DMFT dir     : {cfg.dmft_dir}")
     print(f"DFT SCRATCH  : {cfg.scratch_dir}")
+    print(f"DMFT SCRATCH : {cfg.dmft_scratch_dir}")
     print("Next manual checkpoint: cd dft && export SCRATCH=$PWD/tmp && init_lapw")
 
 
@@ -28,9 +30,9 @@ def run_dft(cfg) -> Path:
     klist = require_file(cfg.dft_dir / f"{case}.klist")
     cfg.scratch_dir.mkdir(parents=True, exist_ok=True)
 
-    # WIEN2k does not obtain k-point parallelism merely from PBS/mpirun.
-    # `run_lapw -p` needs a `.machines` file.  Use Haule's helper so its
-    # distribution logic stays consistent with eDMFT.
+    # WIEN2k k-point parallelism is controlled by .machines + run_lapw -p.
+    # For this cluster the validated mode is single_node_compact, configured
+    # through parallel.wien_machines_mode.
     write_wien_machines(cfg, cfg.dft_dir, klist, "dft")
 
     cmd = str(cfg.get("dft.run_command", "run_lapw -p -ec 0.0001 -cc 0.0001"))
@@ -52,14 +54,14 @@ def run_dft(cfg) -> Path:
 def prepare_dmft(cfg, force: bool = False) -> Path:
     """Populate dmft/ from dft/ but deliberately do not run init_dmft.py.
 
-    Important `dmft_copy.py` semantics: its positional argument is the SOURCE
-    directory, while the DESTINATION is always the current working directory.
-    Consequently we execute it with cwd=dmft/ and pass dft/ as the sole source.
+    dmft_copy.py SOURCE copies FROM SOURCE INTO THE CURRENT WORKING DIRECTORY.
+    Therefore this function executes with cwd=dmft/ and passes dft/ as source.
     """
     case = cfg.case
     require_file(cfg.dft_dir / f"{case}.struct")
     require_file(cfg.dft_dir / f"{case}.scf")
     cfg.dmft_dir.mkdir(parents=True, exist_ok=True)
+    cfg.dmft_scratch_dir.mkdir(parents=True, exist_ok=True)
 
     important = [
         cfg.dmft_dir / f"{case}.indmfl",
@@ -77,6 +79,7 @@ def prepare_dmft(cfg, force: bool = False) -> Path:
         cfg,
         [dmft_copy, str(cfg.dft_dir)],
         cwd=cfg.dmft_dir,
+        scratch=cfg.dmft_scratch_dir,
         log=cfg.dmft_dir / "dmft_copy_from_dft.log",
     )
     require_file(cfg.dmft_dir / f"{case}.struct")
@@ -93,13 +96,13 @@ def run_dmft(cfg) -> Path:
     require_file(cfg.dmft_dir / f"{case}.indmfi")
     require_file(cfg.dmft_dir / "params.dat")
     klist = require_file(cfg.dmft_dir / f"{case}.klist")
+    cfg.dmft_scratch_dir.mkdir(parents=True, exist_ok=True)
 
-    # Two independent parallel mechanisms are used by upstream run_dmft.py:
-    #   1) mpi_prefix.dat(.2) for eDMFT executables / internal LAPW1;
-    #   2) .machines for WIEN2k parallel sections.
-    # Upstream run_dmft.py explicitly switches to WIEN2k -p when .machines exists.
+    # The confirmed working MnO job uses mpi_prefix.dat for eDMFT.  WIEN2k
+    # .machines inside run_dmft.py is optional and is OFF in the MnO config
+    # unless explicitly requested.
     write_edmft_mpi_prefix(cfg, cfg.dmft_dir, "dmft")
-    if bool(cfg.get("parallel.dmft_wien_machines", True)):
+    if bool(cfg.get("parallel.dmft_wien_machines", False)):
         write_wien_machines(cfg, cfg.dmft_dir, klist, "dmft")
 
     cmd = cfg.get("dmft.run_command")
@@ -114,6 +117,7 @@ def run_dmft(cfg) -> Path:
         cfg,
         str(cmd),
         cwd=cfg.dmft_dir,
+        scratch=cfg.dmft_scratch_dir,
         log=cfg.dmft_dir / "run_dmft.log",
     )
     require_file(cfg.dmft_dir / "info.iterate")
