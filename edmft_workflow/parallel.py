@@ -34,12 +34,6 @@ def in_batch_job() -> bool:
 
 
 def stage_ranks(cfg, stage: str, *, upper_bound: int | None = None) -> int:
-    """Resolve the number of MPI ranks for a stage.
-
-    `parallel.<stage>_ranks = "allocation"` means use the PBS allocation.
-    Outside PBS, `parallel.foreground_ranks` is used as the allocation surrogate.
-    An integer requests that many ranks but never exceeds the real PBS allocation.
-    """
     alloc = allocated_ranks()
     if alloc == 1 and not in_batch_job():
         alloc = int(cfg.get("parallel.foreground_ranks", 1))
@@ -71,12 +65,6 @@ def mpi_prefix(cfg, ranks: int) -> str:
 
 
 def write_edmft_mpi_prefix(cfg, cwd: Path, stage: str) -> int:
-    """Write the files that Haule's DmftEnvironment actually consumes.
-
-    Upstream eDMFT reads `mpi_prefix.dat` and optionally `mpi_prefix.dat2` from
-    the current working directory.  `x_dmft.py lapw1` uses MPI2, so writing both
-    files avoids accidentally falling back to serial execution.
-    """
     cwd.mkdir(parents=True, exist_ok=True)
     ranks = stage_ranks(cfg, stage)
     text = mpi_prefix(cfg, ranks) + "\n"
@@ -98,14 +86,50 @@ def write_edmft_mpi_prefix(cfg, cwd: Path, stage: str) -> int:
     return ranks
 
 
-def write_wien_machines(cfg, cwd: Path, klist: Path, stage: str) -> Path:
-    """Create `.machines` using Haule's own `createW2kmachinef.py` helper.
+def _write_single_node_compact_machines(cfg, cwd: Path, stage: str) -> Path:
+    """Reproduce the user's validated single-node WIEN2k `.machines` file.
 
-    Under PBS the real `PBS_NODEFILE` is used.  For explicit foreground
-    debugging we synthesize a local hostfile with `parallel.foreground_ranks`
-    entries.  The helper also caps k-point parallelism to the number of k points.
+    PBS form:
+        1:<first-host>:<number-of-slots>
+        granularity:1
+        extrafine:1
     """
+    hosts = pbs_hosts()
+    if hosts:
+        unique = list(dict.fromkeys(hosts))
+        if len(unique) != 1:
+            raise WorkflowError(
+                "parallel.wien_machines_mode='single_node_compact' requires a single PBS node; "
+                f"allocation contains {len(unique)} hosts: {unique}"
+            )
+        host = unique[0]
+        np = len(hosts)
+    else:
+        host = "localhost"
+        np = stage_ranks(cfg, stage)
+
+    path = cwd / ".machines"
+    path.write_text(
+        f"1:{host}:{np}\n"
+        "granularity:1\n"
+        "extrafine:1\n",
+        encoding="utf-8",
+    )
+    print(f"WIEN2k .machines ({stage}, single_node_compact):\n{path.read_text()}")
+    return path
+
+
+def write_wien_machines(cfg, cwd: Path, klist: Path, stage: str) -> Path:
+    """Create `.machines` according to the configured WIEN2k parallel policy."""
     require_file(klist)
+    mode = str(cfg.get("parallel.wien_machines_mode", "haule")).lower()
+
+    if mode in {"single_node_compact", "validated_single_node"}:
+        return _write_single_node_compact_machines(cfg, cwd, stage)
+
+    if mode != "haule":
+        raise WorkflowError(f"Unknown parallel.wien_machines_mode={mode!r}")
+
     root = cfg.get("environment.edmft_root")
     if not root:
         raise WorkflowError("environment.edmft_root is required for createW2kmachinef.py")
