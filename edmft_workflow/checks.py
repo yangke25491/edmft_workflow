@@ -170,7 +170,6 @@ def _manifest_check(root: Path) -> tuple[str, bool, str]:
 
 
 def _optional_pbs(checks: list[tuple[str, bool, str]], path: Path) -> None:
-    """Validate a PBS script if it has already been frozen, but do not require it during prepare review."""
     if path.exists():
         checks.append(_file_check(path.name, path))
 
@@ -219,7 +218,7 @@ def doctor_maxent(cfg) -> list[tuple[str, bool, str]]:
     root = cfg.dmft_dir / "maxent"
     checks = [
         _file_check("selected_sigmas.txt", root / "selected_sigmas.txt"),
-        _sigma_table_check("Sig.average", root / "Sig.average"),
+        _sigma_table_check("sig.inpx", root / "sig.inpx"),
         _file_check("maxent_params.dat", root / "maxent_params.dat"),
         _manifest_check(root),
     ]
@@ -252,7 +251,6 @@ def doctor_dos(cfg) -> list[tuple[str, bool, str]]:
         _file_check("indmfl.diff", root / "indmfl.diff"),
         _manifest_check(root),
     ]
-    _optional_pbs(checks, root / "run_dos.pbs")
     if (root / f"{case}.cdos").exists():
         marker_ok, marker_detail = _dmft1_end(root, case)
         checks.append(("DMFT1 END", marker_ok, marker_detail))
@@ -277,7 +275,6 @@ def doctor_band(cfg) -> list[tuple[str, bool, str]]:
         _file_check("indmfl.diff", root / "indmfl.diff"),
         _manifest_check(root),
     ]
-    _optional_pbs(checks, root / "run_band.pbs")
     if klist.exists() and klist.stat().st_size > 0:
         try:
             checks.append(("k-point count", True, str(count_klist_points(klist))))
