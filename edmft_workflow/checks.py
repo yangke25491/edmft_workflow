@@ -219,7 +219,7 @@ def doctor_maxent(cfg) -> list[tuple[str, bool, str]]:
     root = cfg.dmft_dir / "maxent"
     checks = [
         _file_check("selected_sigmas.txt", root / "selected_sigmas.txt"),
-        _sigma_table_check("sig.inpx", root / "sig.inpx"),
+        _sigma_table_check("Sig.average", root / "Sig.average"),
         _file_check("maxent_params.dat", root / "maxent_params.dat"),
         _manifest_check(root),
     ]
