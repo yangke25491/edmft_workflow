@@ -22,7 +22,7 @@ def test_low_frequency_z_diagnostic_linear_case():
     assert np.isclose(mass, 2.0)
 
 
-def test_manifest_detects_edit_and_refreshes_at_pbs_freeze(tmp_path: Path):
+def test_manifest_allows_review_edits_then_freezes_at_pbs_generation(tmp_path: Path):
     stage = tmp_path / "maxent"
     stage.mkdir()
     source = tmp_path / "sig.inp.10.1"
@@ -34,13 +34,26 @@ def test_manifest_detects_edit_and_refreshes_at_pbs_freeze(tmp_path: Path):
     ok, _ = verify_stage_manifest(stage)
     assert ok
 
+    # User edits between prepare-* and PBS freeze are intentional and doctor-safe.
     params.write_text("params={'Ntau':500}\n", encoding="utf-8")
     ok, detail = verify_stage_manifest(stage)
+    assert ok
+    assert "allowed before PBS freeze" in detail
+
+    # A strict check can still see that the prepare-time snapshot changed.
+    ok, detail = verify_stage_manifest(stage, strict=True)
     assert not ok
     assert "maxent_params.dat" in detail
 
+    # PBS generation refreshes the manifest and freezes the inspected state.
     pbs = stage / "run_maxent.pbs"
     pbs.write_text("#!/bin/bash\n", encoding="utf-8")
     refresh_stage_manifest(stage, extra_prepared=[pbs])
     ok, _ = verify_stage_manifest(stage)
     assert ok
+
+    # Changes after freeze must be detected.
+    params.write_text("params={'Ntau':600}\n", encoding="utf-8")
+    ok, detail = verify_stage_manifest(stage)
+    assert not ok
+    assert "maxent_params.dat" in detail
