@@ -1,6 +1,12 @@
 # Generic project-local configuration.
-# Put this file at PROJECT/config.toml.  No calculation path is hard-coded:
+# Put this file at PROJECT/config.toml.
 # root_dir = "." means the directory containing this config file.
+#
+# Scientific native inputs can be kept in PROJECT/inputs/:
+#   inputs/params.dat
+#   inputs/maxent_params.dat
+#   inputs/CASE.klist_band
+# Native files take priority over generated fallbacks.
 
 [project]
 case = "01"
@@ -9,7 +15,6 @@ scratch_dir = "dft/tmp"
 dmft_scratch_dir = "dmft/tmp"
 
 [environment]
-# Software installation paths: these are site-wide, not project paths.
 wienroot = "/home/USER/apps/edmft/wien2k"
 edmft_root = "/home/USER/apps/edmft/eDMFT/bin"
 python = "/home/USER/miniforge3/envs/edmft/bin/python"
@@ -29,57 +34,24 @@ I_MPI_FABRICS = "shm"
 [parallel]
 mpi_launcher = "/opt/intel2019/compilers_and_libraries_2019.4.243/linux/mpi/intel64/bin/mpirun"
 mpi_np_flag = "-np"
-mpi_extra_args = []
 write_mpi_prefix2 = true
-foreground_ranks = 1
-dft_ranks = "allocation"
-dmft_ranks = "allocation"
-maxent_ranks = "allocation"
-dos_ranks = "allocation"
-band_ranks = "allocation"
-
-# Reproduce the validated single-node WIEN2k .machines format:
-#   1:<host>:<NP>
-#   granularity:1
-#   extrafine:1
 wien_machines_mode = "single_node_compact"
-
-# The validated MnO run_dmft.py job used mpi_prefix.dat without an additional
-# WIEN2k .machines file. Enable this only after testing it for another setup.
 dmft_wien_machines = false
 
-[commands]
-dmft_copy = "dmft_copy.py"
-szero = "szero.py"
-saverage = "saverage.py"
-maxent = "maxent_run.py"
-x_dmft = "x_dmft.py"
-wien_x = "x"
-
 [dft]
-# Manual checkpoint 1 happens first: init_lapw inside PROJECT/dft.
-run_command = "run_lapw -p -cc 0.0001 -ec 0.0001 -i 100"
+# This string is resolved into the generated standalone DFT PBS script.
+run_command = "/home/USER/apps/edmft/wien2k/run_lapw -p -cc 0.0001 -ec 0.0001 -i 100"
 
-[dmft]
-# Manual checkpoint 2 is init_dmft.py in the converged PROJECT/dft directory.
-# After prepare-dmft, run_dmft.py itself is launched automatically from dmft/.
-# If run_command is omitted, workflow uses environment.python + edmft_root/run_dmft.py.
-
-# -----------------------------------------------------------------------------
-# params.dat generation
-# -----------------------------------------------------------------------------
-# Keys in [dmft_params] are written as top-level Python assignments in params.dat.
-# These examples match common upstream defaults but remain scientific choices.
+# Preferred: provide PROJECT/inputs/params.dat.
+# Fallback only: if that file is absent, these sections can generate params.dat.
 [dmft_params]
 solver = "CTQMC"
 DCs = "nominal"
 max_dmft_iterations = 1
 max_lda_iterations = 100
 
-# Each [impurityN] section becomes iparamsN in params.dat using Haule's
-# [value, comment] convention.  Fill these from a validated calculation.
-# prepare-dmft deliberately refuses to invent U/J/beta/nf0 for you.
 [impurity0]
+# Fill only if you are NOT supplying inputs/params.dat.
 # exe = "ctqmc"
 # U = 8.0
 # J = 0.8
@@ -88,10 +60,6 @@ max_lda_iterations = 100
 # M = 5000000
 
 [dmft_prepare]
-# "szero" calls the official szero.py after params.dat is generated.
-# With a complete iparams0 containing beta, U, J and nf0, szero.py can infer
-# the Matsubara mesh and starting double counting.  Add explicit CLI options
-# here when desired, e.g. ["-e", "38.0", "-n", "1000"].
 initial_sigma = "szero"
 szero_args = []
 
@@ -100,38 +68,32 @@ max_dn = 0.005
 outer_drift = 0.005
 block_postprocess = true
 
-[maxent]
+[post]
+# Which impurity self-energy suffix to continue, e.g. sig.inp.*.1
 impurity = 1
-average_last = 5
+# Average the last N selected Matsubara self-energies with official saverage.py.
+average_last = 3
 
-[maxent_params]
-statistics = "fermi"
-Ntau = 300
-L = 20.0
-x0 = 0.005
-bwdth = 0.004
-Nw = 300
-gwidth = 30.0
-idg = 1
-deltag = 0.004
-Asteps = 4000
-alpha0 = 1000
-min_ratio = 0.001
-iflat = 1
-Nitt = 1000
-Nr = 0
-Nf = 40
+# maxent_params.dat is intentionally NOT hidden in config.toml.
+# Preferred: PROJECT/inputs/maxent_params.dat.
+# If absent, prepare-maxent writes the current upstream maxent_run.py template
+# into dmft/maxent/maxent_params.dat for explicit inspection/editing.
 
 [dos]
+# prepare-dos copies the Matsubara indmfl, preserves a backup, then changes
+# its second-line Matsubara flag 1 -> 0 and sets this real-frequency mesh.
 nomega = 200
 wmin = -3.0
 wmax = 1.0
 
 [band]
+# prepare-band independently starts from the converged dmft/ snapshot,
+# changes the copied indmfl flag 1 -> 0, and sets this real-frequency mesh.
 nomega = 200
 wmin = -6.0
 wmax = 6.0
-# Example only; change to the correct lattice/path for each material.
+# Preferred path input: PROJECT/inputs/CASE.klist_band.
+# Fallback example only:
 klist_source = "@wien:fcc.klist"
 
 [plot]
@@ -142,8 +104,10 @@ dos_xmax = 1.0
 akw_intensity = 0.97
 drop_klabels = ["LAMBDA", "DELTA", "Z"]
 
+# PBS settings are used only when GENERATING standalone scripts.
+# Generated jobs do not read config.toml and do not call workflow.py.
+# The user submits them manually with qsub.
 [pbs]
-qsub = "qsub"
 queue = "batch"
 nodes = 1
 ppn = 1
@@ -164,17 +128,17 @@ mem = ""
 [pbs_maxent]
 job_name = "MaxEnt"
 ppn = 8
-mem = "16gb"
 walltime = "04:00:00"
+mem = ""
 
 [pbs_dos]
 job_name = "DOS"
 ppn = 20
-mem = "32gb"
 walltime = "04:00:00"
+mem = ""
 
 [pbs_band]
 job_name = "BAND"
 ppn = 33
-mem = "32gb"
 walltime = "04:00:00"
+mem = ""
