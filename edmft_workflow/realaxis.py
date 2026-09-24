@@ -1,81 +1,123 @@
 from __future__ import annotations
 
 from pathlib import Path
+import difflib
 import shutil
 
-from .parallel import write_edmft_mpi_prefix
 from .utils import (
     WorkflowError, copy_case_files, patch_indmfl, require_file,
     run_stage, safe_prepare_dir,
 )
 
 
+def _edmft_command(cfg, name: str) -> str:
+    key = name.replace(".py", "").replace("-", "_")
+    configured = cfg.get(f"commands.{key}")
+    if configured:
+        return str(configured)
+    root = cfg.get("environment.edmft_root")
+    if not root:
+        raise WorkflowError(f"environment.edmft_root is required to locate {name}")
+    return str(Path(str(root)) / name)
+
+
 def _copy_wien_potentials(cfg, out: Path) -> None:
-    """Make the post-processing directory independent of its parent directory."""
+    """Copy converged potentials so real-axis work cannot modify dmft/."""
     case = cfg.case
-    # dmft_copy.py does not include vsp/vns. LAPW1 needs the converged potentials
-    # locally, so copy them explicitly from the converged dmft/ parent.
-    copy_case_files(cfg.dmft_dir, out, case, ["vsp", "vns"], required=True)
+    copy_case_files(cfg.dmft_dir, out, case, ["vsp", "vns"], required=False)
     copy_case_files(
         cfg.dmft_dir, out, case,
-        ["vspup", "vspdn", "vnsup", "vnsdn"], required=False,
+        ["vspup", "vspdn", "vnsup", "vnsdn", "vrespsum"], required=False,
     )
+    base_ok = all((out / f"{case}.{s}").is_file() and (out / f"{case}.{s}").stat().st_size > 0
+                  for s in ("vsp", "vns"))
+    spin_ok = all((out / f"{case}.{s}").is_file() and (out / f"{case}.{s}").stat().st_size > 0
+                  for s in ("vspup", "vspdn", "vnsup", "vnsdn"))
+    if not (base_ok or spin_ok):
+        raise WorkflowError(
+            "Real-axis directory needs converged potential files: case.vsp+case.vns "
+            "or vspup/vspdn/vnsup/vnsdn."
+        )
+
+
+def _indmfl_flag(path: Path) -> int:
+    require_file(path)
+    lines = path.read_text(errors="ignore").splitlines()
+    if len(lines) < 2 or not lines[1].split():
+        raise WorkflowError(f"Malformed indmfl file: {path}")
+    try:
+        return int(lines[1].split()[0])
+    except ValueError as exc:
+        raise WorkflowError(f"Invalid Matsubara flag in {path}: {lines[1]}") from exc
+
+
+def _prepare_real_axis_indmfl(path: Path, nomega: int, wmin: float, wmax: float) -> Path:
+    """Preserve the Matsubara input and make the documented 1 -> 0 switch."""
+    require_file(path)
+    before = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    if _indmfl_flag(path) != 1:
+        raise WorkflowError(
+            f"Expected Matsubara flag 1 before real-axis conversion, found {_indmfl_flag(path)} in {path}"
+        )
+
+    backup = path.with_name(path.name + ".matsubara")
+    shutil.copy2(path, backup)
+    patch_indmfl(path, matsubara=0, nomega=nomega, wmin=wmin, wmax=wmax)
+    if _indmfl_flag(path) != 0:
+        raise WorkflowError(f"Failed to switch Matsubara flag from 1 to 0 in {path}")
+
+    after = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    diff = path.parent / "indmfl.diff"
+    diff.write_text(
+        "".join(difflib.unified_diff(before, after, fromfile=backup.name, tofile=path.name)),
+        encoding="utf-8",
+    )
+    return backup
 
 
 def prepare_dos(cfg, force: bool = False) -> Path:
+    """Prepare a standalone real-axis DOS directory; do not run numerical jobs."""
     case = cfg.case
     source = cfg.dmft_dir
-    out = safe_prepare_dir(cfg.dmft_dir / "onreal", force=force)
-    dmft_copy = str(cfg.get("commands.dmft_copy", "dmft_copy.py"))
+    require_file(source / f"{case}.indmfl")
+    require_file(source / "info.iterate")
+    sig = require_file(source / "maxent" / "Sig.out")
 
-    # dmft_copy.py copies FROM its argument INTO the current directory.
+    out = safe_prepare_dir(source / "onreal", force=force)
+    dmft_copy = _edmft_command(cfg, "dmft_copy.py")
+
+    # Official semantics: dmft_copy.py SOURCE copies SOURCE into cwd.
     run_stage(cfg, [dmft_copy, str(source)], cwd=out, log=out / "dmft_copy.log")
     _copy_wien_potentials(cfg, out)
 
-    sig = cfg.dmft_dir / "maxent" / "Sig.out"
-    require_file(sig)
+    # The continued real-axis self-energy is named sig.inp for dmft1/dmftp.
     shutil.copy2(sig, out / "sig.inp")
 
-    indmfl = out / f"{case}.indmfl"
-    require_file(indmfl)
-    shutil.copy2(indmfl, out / f"{case}.indmfl.matsubara")
-    patch_indmfl(
+    indmfl = require_file(out / f"{case}.indmfl")
+    backup = _prepare_real_axis_indmfl(
         indmfl,
-        matsubara=0,
         nomega=int(cfg.get("dos.nomega", 200)),
         wmin=float(cfg.get("dos.wmin", -3.0)),
         wmax=float(cfg.get("dos.wmax", 1.0)),
     )
-    return out
 
+    (out / "prepare.log").write_text(
+        "\n".join([
+            f"source_dmft={source}",
+            f"self_energy_source={sig}",
+            f"self_energy_target={out / 'sig.inp'}",
+            f"indmfl_backup={backup}",
+            "matsubara_flag=0",
+            f"nomega={int(cfg.get('dos.nomega', 200))}",
+            f"wmin={float(cfg.get('dos.wmin', -3.0))}",
+            f"wmax={float(cfg.get('dos.wmax', 1.0))}",
+        ]) + "\n",
+        encoding="utf-8",
+    )
 
-def run_dos(cfg, force: bool = False) -> Path:
-    case = cfg.case
-    out = prepare_dos(cfg, force=force)
-    wien_x = str(cfg.get("commands.wien_x", "x"))
-    xdmft = str(cfg.get("commands.x_dmft", "x_dmft.py"))
-
-    # x_dmft.py reads mpi_prefix.dat(.2) from its current directory.  In
-    # particular, upstream `x_dmft.py lapw1` invokes LAPW1 with MPI2.
-    write_edmft_mpi_prefix(cfg, out, "dos")
-
-    # LAPW0 is inexpensive for this post-processing stage; the heavy LAPW1 and
-    # dmft1 steps below use the generated eDMFT MPI prefix.
-    run_stage(cfg, [wien_x, "lapw0", "-f", case], cwd=out, log=out / "lapw0.log")
-    run_stage(cfg, [xdmft, "lapw1"], cwd=out, log=out / "lapw1.log")
-    require_file(out / f"{case}.vector")
-    require_file(out / f"{case}.energy")
-
-    run_stage(cfg, [xdmft, "dmft1"], cwd=out, log=out / "dmft1.log")
-    marker_ok = False
-    for p in [out / "dmft1.log", out / f"{case}.outputdmf1"]:
-        if p.exists() and "DMFT1 END" in p.read_text(errors="ignore"):
-            marker_ok = True
-            break
-    if not marker_ok:
-        raise WorkflowError("dmft1 did not report 'DMFT1 END'")
-
-    for name in [f"{case}.cdos", f"{case}.gc1", f"{case}.dlt1", f"{case}.Eimp1"]:
-        require_file(out / name)
-    print(f"Real-axis DOS complete: {out}")
+    print(f"Real-axis DOS directory prepared: {out}")
+    print(f"Self-energy: {sig} -> {out / 'sig.inp'}")
+    print(f"indmfl Matsubara backup: {backup}")
+    print("indmfl Matsubara flag: 1 -> 0")
+    print(f"Review changes: {out / 'indmfl.diff'}")
     return out
