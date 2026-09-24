@@ -13,14 +13,15 @@ from .maxent import prepare_maxent
 from .realaxis import prepare_dos
 from .band import prepare_band
 from .pbs import write_pbs
+from .foreground import run_foreground
 
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="edmft-workflow",
         description=(
-            "Transparent WIEN2k + Haule eDMFT workflow manager: prepare files, generate standalone PBS, "
-            "check results, and analyze outputs. qsub is always manual."
+            "Transparent WIEN2k + Haule eDMFT workflow manager: prepare files, generate standalone PBS for "
+            "DFT/DMFT/MaxEnt, run DOS/band in foreground MPI, check results, and analyze outputs."
         ),
     )
     p.add_argument("-c", "--config", default="config.toml", help="Path to TOML configuration")
@@ -37,7 +38,7 @@ def _build_parser() -> argparse.ArgumentParser:
     for stage in ("maxent", "dos", "band"):
         sp = sub.add_parser(
             f"prepare-{stage}",
-            help=f"Prepare {stage} native inputs only; inspect them before generating PBS",
+            help=f"Prepare {stage} native inputs only; inspect them before numerical execution",
         )
         sp.add_argument("--force", action="store_true")
 
@@ -57,13 +58,13 @@ def _build_parser() -> argparse.ArgumentParser:
 
     prep = sub.add_parser(
         "pbs",
-        help="Freeze current prepared inputs into a standalone PBS script; inspect it and qsub manually",
+        help="Freeze DFT/DMFT/MaxEnt inputs into a standalone PBS script; qsub is always manual",
     )
-    prep.add_argument("stage", choices=["dft", "dmft", "maxent", "dos", "band"])
+    prep.add_argument("stage", choices=["dft", "dmft", "maxent"])
     prep.add_argument("--force", action="store_true")
 
-    runp = sub.add_parser("run", help="Foreground-only lightweight operations")
-    runp.add_argument("stage", choices=["plots"])
+    runp = sub.add_parser("run", help="Foreground operations")
+    runp.add_argument("stage", choices=["dos", "band", "plots"])
 
     analyze = sub.add_parser("analyze", help="Generate common scientific diagnostics in the foreground")
     analyze.add_argument("stage", nargs="?", choices=["all"], default="all")
@@ -90,10 +91,8 @@ def _status(cfg) -> None:
         ("MaxEnt PBS", cfg.dmft_dir / "maxent" / "run_maxent.pbs"),
         ("MaxEnt result", cfg.dmft_dir / "maxent" / "Sig.out"),
         ("DOS inputs", cfg.dmft_dir / "onreal" / "manifest.json"),
-        ("DOS PBS", cfg.dmft_dir / "onreal" / "run_dos.pbs"),
         ("DOS result", cfg.dmft_dir / "onreal" / f"{case}.cdos"),
         ("Band inputs", cfg.dmft_dir / "band" / "manifest.json"),
-        ("Band PBS", cfg.dmft_dir / "band" / "run_band.pbs"),
         ("Band result", cfg.dmft_dir / "band" / "eigvals.dat"),
         ("Analysis", cfg.dmft_dir / "analysis" / "summary.md"),
     ]
@@ -111,10 +110,14 @@ def _prepare_stage(cfg, stage: str, force: bool) -> None:
         out = prepare_band(cfg, force=force)
     else:  # pragma: no cover
         raise WorkflowError(f"Unsupported prepare stage: {stage}")
+
     print(f"Prepared native {stage} inputs: {out}")
     print(f"Next check: python workflow.py -c {cfg.source} doctor {stage}")
-    print(f"After inspection/editing, freeze PBS: python workflow.py -c {cfg.source} pbs {stage}")
-    print("Then inspect the generated run_*.pbs and submit it yourself with qsub.")
+    if stage == "maxent":
+        print(f"After inspection/editing, freeze PBS: python workflow.py -c {cfg.source} pbs maxent")
+        print("Then inspect run_maxent.pbs and submit it yourself with qsub.")
+    else:
+        print(f"After inspection, run foreground MPI: python workflow.py -c {cfg.source} run {stage}")
 
 
 def _analyze(cfg) -> None:
@@ -167,9 +170,13 @@ def main(argv=None) -> int:
             print(write_pbs(cfg, args.stage, force=args.force))
             return 0
 
-        if args.command == "run" and args.stage == "plots":
-            _analyze(cfg)
-            return 0
+        if args.command == "run":
+            if args.stage in {"dos", "band"}:
+                run_foreground(cfg, args.stage)
+                return 0
+            if args.stage == "plots":
+                _analyze(cfg)
+                return 0
 
         if args.command == "analyze":
             _analyze(cfg)
