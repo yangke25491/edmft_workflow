@@ -5,18 +5,7 @@ import shutil
 
 from .provenance import write_stage_manifest
 from .realaxis import _copy_wien_potentials, _prepare_real_axis_indmfl
-from .utils import WorkflowError, count_klist_points, require_file, run_stage, safe_prepare_dir
-
-
-def _edmft_command(cfg, name: str) -> str:
-    key = name.replace(".py", "").replace("-", "_")
-    configured = cfg.get(f"commands.{key}")
-    if configured:
-        return str(configured)
-    root = cfg.get("environment.edmft_root")
-    if not root:
-        raise WorkflowError(f"environment.edmft_root is required to locate {name}")
-    return str(Path(str(root)) / name)
+from .utils import WorkflowError, count_klist_points, require_file, run_edmft_helper, safe_prepare_dir
 
 
 def resolve_klist_source(cfg) -> Path:
@@ -40,7 +29,11 @@ def resolve_klist_source(cfg) -> Path:
 
 
 def prepare_band(cfg, force: bool = False) -> Path:
-    """Prepare an independent real-axis A(k,w) directory; do not run numerical jobs."""
+    """Prepare an independent real-axis A(k,w) directory; do not run numerical jobs.
+
+    Preparation uses only lightweight file work plus dmft_copy.py. The heavy
+    Intel/MKL/MPI environment belongs to the later standalone band PBS job.
+    """
     case = cfg.case
     source = cfg.dmft_dir
     source_indmfl = require_file(source / f"{case}.indmfl")
@@ -48,11 +41,16 @@ def prepare_band(cfg, force: bool = False) -> Path:
     sig = require_file(source / "maxent" / "Sig.out")
 
     out = safe_prepare_dir(source / "band", force=force)
-    dmft_copy = _edmft_command(cfg, "dmft_copy.py")
 
     # Start from the converged Matsubara DMFT snapshot, not from DOS/onreal.
     # This keeps DOS and band completely independent.
-    run_stage(cfg, [dmft_copy, str(source)], cwd=out, log=out / "dmft_copy.log")
+    run_edmft_helper(
+        cfg,
+        "dmft_copy.py",
+        [str(source)],
+        cwd=out,
+        log=out / "dmft_copy.log",
+    )
     potentials = _copy_wien_potentials(cfg, out)
 
     sig_target = out / "sig.inp"
