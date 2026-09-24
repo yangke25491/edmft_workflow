@@ -45,6 +45,7 @@ I_MPI_HYDRA_BOOTSTRAP = "ssh"
 I_MPI_FABRICS = "shm"
 
 [parallel]
+# MPI used by native WIEN2k/eDMFT numerical stages (run_dmft.py/x_dmft.py).
 mpi_launcher = "/opt/intel2019/compilers_and_libraries_2019.4.243/linux/mpi/intel64/bin/mpirun"
 mpi_np_flag = "-np"
 # Post-processing x_dmft.py installations commonly use mpi_prefix.dat2 for LAPW1.
@@ -93,6 +94,20 @@ average_last = 3
 # Preferred: PROJECT/inputs/maxent_params.dat.
 # If absent, prepare-maxent writes the current upstream maxent_run.py template
 # into dmft/maxent/maxent_params.dat for explicit inspection/editing.
+
+[maxent]
+# IMPORTANT: MaxEnt uses Python mpi4py, whose MPI vendor may differ from the
+# Intel MPI used by WIEN2k/eDMFT. Therefore MaxEnt does NOT inherit
+# parallel.mpi_launcher.
+#
+# Default = upstream-compatible direct invocation:
+#   python maxent_run.py sig.inpx
+# This gives mpi4py a singleton COMM_WORLD and avoids mixing MPI vendors.
+#
+# Enable parallel MaxEnt only after verifying that the launcher matches the MPI
+# vendor reported by this exact Python environment's mpi4py, e.g.:
+# mpi_launcher = "/home/USER/miniforge3/envs/edmft/bin/mpirun"
+# mpi_np_flag = "-np"
 
 [dos]
 # prepare-dos copies the Matsubara indmfl, preserves a backup, then changes
@@ -148,7 +163,9 @@ mem = ""
 
 [pbs_maxent]
 job_name = "MaxEnt"
-ppn = 8
+# Default direct-Python MaxEnt launches one process. Increase this only when
+# maxent.mpi_launcher is explicitly set to an mpi4py-compatible MPI launcher.
+ppn = 1
 walltime = "04:00:00"
 mem = ""
 
