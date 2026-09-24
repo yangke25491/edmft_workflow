@@ -10,6 +10,7 @@ from .utils import (
     WorkflowError,
     copy_case_files,
     require_file,
+    run_edmft_helper,
     run_stage,
     safe_prepare_dir,
 )
@@ -31,17 +32,6 @@ def init_layout(cfg) -> None:
     print("After DFT convergence, manual checkpoint 2 is init_dmft.py in the SAME dft/ directory.")
 
 
-def _edmft_command(cfg, name: str) -> str:
-    key = name.replace(".py", "").replace("-", "_")
-    configured = cfg.get(f"commands.{key}")
-    if configured:
-        return str(configured)
-    root = cfg.get("environment.edmft_root")
-    if not root:
-        raise WorkflowError(f"environment.edmft_root is required to locate {name}")
-    return str(Path(str(root)) / name)
-
-
 def run_dft(cfg) -> Path:
     """Foreground/debug runner retained for compatibility; production uses static PBS."""
     case = cfg.case
@@ -54,8 +44,13 @@ def run_dft(cfg) -> Path:
     cmd = str(cfg.get("dft.run_command", "run_lapw -p -ec 0.0001 -cc 0.0001"))
     if " -p" not in f" {cmd} ":
         cmd += " -p"
-    run_stage(cfg, cmd, cwd=cfg.dft_dir, scratch=cfg.scratch_dir,
-              log=cfg.dft_dir / "edmft_workflow_dft.log")
+    run_stage(
+        cfg,
+        cmd,
+        cwd=cfg.dft_dir,
+        scratch=cfg.scratch_dir,
+        log=cfg.dft_dir / "edmft_workflow_dft.log",
+    )
     require_file(cfg.dft_dir / f"{case}.scf")
     return cfg.dft_dir
 
@@ -159,7 +154,9 @@ def _copy_dft_state_extras(cfg) -> None:
     target = cfg.dmft_dir
     copy_case_files(source, target, case, ["indmf"], required=True)
     copy_case_files(
-        source, target, case,
+        source,
+        target,
+        case,
         ["vsp", "vns", "vspup", "vspdn", "vnsup", "vnsdn", "vrespsum"],
         required=False,
     )
@@ -184,13 +181,16 @@ def _prepare_initial_sigma(cfg) -> Path:
     if mode != "szero":
         raise WorkflowError("dmft_prepare.initial_sigma must be 'szero' or 'keep'")
 
-    szero = _edmft_command(cfg, "szero.py")
     extra = cfg.get("dmft_prepare.szero_args", [])
     if isinstance(extra, str):
         extra = shlex.split(extra)
-    run_stage(
-        cfg, [szero, *[str(x) for x in extra]], cwd=cfg.dmft_dir,
-        scratch=cfg.dmft_scratch_dir, log=cfg.dmft_dir / "szero.log",
+    run_edmft_helper(
+        cfg,
+        "szero.py",
+        [str(x) for x in extra],
+        cwd=cfg.dmft_dir,
+        scratch=cfg.dmft_scratch_dir,
+        log=cfg.dmft_dir / "szero.log",
     )
     return require_file(sig)
 
@@ -209,9 +209,13 @@ def _validate_dmft_snapshot(cfg) -> None:
 
 
 def prepare_dmft(cfg, force: bool = False) -> Path:
-    """Create an isolated DMFT snapshot after DFT + manual init_dmft.py in dft/."""
+    """Create an isolated DMFT snapshot after DFT + manual init_dmft.py in dft/.
+
+    Preparation deliberately avoids the heavy Intel/MKL/MPI runtime. The few
+    upstream helper scripts run as explicit child processes with minimal local
+    environment only; the full runtime is reserved for the standalone PBS job.
+    """
     _validate_dft_ready(cfg)
-    # Validate the params source before backing up any existing dmft/ directory.
     supplied = cfg.root_dir / "inputs" / "params.dat"
     if not supplied.exists():
         render_params_dat(cfg)
@@ -221,10 +225,12 @@ def prepare_dmft(cfg, force: bool = False) -> Path:
     _prepare_clean_dmft_dir(cfg, force=force)
     cfg.dmft_scratch_dir.mkdir(parents=True, exist_ok=True)
 
-    dmft_copy = _edmft_command(cfg, "dmft_copy.py")
-    run_stage(
-        cfg, [dmft_copy, str(cfg.dft_dir)], cwd=cfg.dmft_dir,
-        scratch=cfg.dmft_scratch_dir, log=cfg.dmft_dir / "dmft_copy_from_dft.log",
+    run_edmft_helper(
+        cfg,
+        "dmft_copy.py",
+        [str(cfg.dft_dir)],
+        cwd=cfg.dmft_dir,
+        log=cfg.dmft_dir / "dmft_copy_from_dft.log",
     )
     _copy_dft_state_extras(cfg)
 
@@ -255,7 +261,12 @@ def run_dmft(cfg) -> Path:
     if not root:
         raise WorkflowError("environment.edmft_root is required to locate run_dmft.py")
     cmd = f"{shlex.quote(py)} {shlex.quote(str(Path(str(root)) / 'run_dmft.py'))}"
-    run_stage(cfg, cmd, cwd=cfg.dmft_dir, scratch=cfg.dmft_scratch_dir,
-              log=cfg.dmft_dir / "run_dmft.log")
+    run_stage(
+        cfg,
+        cmd,
+        cwd=cfg.dmft_dir,
+        scratch=cfg.dmft_scratch_dir,
+        log=cfg.dmft_dir / "run_dmft.log",
+    )
     require_file(cfg.dmft_dir / "info.iterate")
     return cfg.dmft_dir
