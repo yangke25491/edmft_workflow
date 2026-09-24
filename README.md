@@ -30,11 +30,34 @@ PROJECT/
     │   └── manifest.json
     ├── band/
     │   └── manifest.json
-    ├── analysis/
-    └── results/
+    └── analysis/
 ```
 
 No numerical stage uses symlinks back into an upstream calculation directory. Mutable WIEN2k/eDMFT state is copied so that `dft/`, `dmft/`, `maxent/`, `onreal/`, and `band/` stay independent.
+
+## Zero-interference environment policy
+
+The workflow does **not** manage or modify the user's login shell. It does not write `.bashrc`, require `env.sh`, install aliases, or permanently export `PATH`, `LD_LIBRARY_PATH`, Intel/MKL, MPI, or WIEN2k variables.
+
+Preparation and numerical execution deliberately use different environment policies:
+
+```text
+prepare-* / doctor / check / status / analyze
+    ↓
+Python file operations + a few lightweight official helpers
+    ↓
+no Intel compilervars, no MKL/MPI setup, no PATH rewrite
+
+pbs STAGE
+    ↓
+generate a standalone heavy-job script
+    ↓
+Intel + MKL + MPI + WIEN2k + eDMFT runtime lives inside that PBS file
+    ↓
+user inspects it and runs qsub manually
+```
+
+When preparation needs an upstream Python helper such as `dmft_copy.py`, `szero.py`, or `saverage.py`, the workflow invokes the configured Python interpreter and the absolute eDMFT script path directly. Only minimal child-process variables such as `WIENROOT`, `WIEN_DMFT_ROOT`, and an explicitly needed `SCRATCH` are supplied. These variables exist only in that child process; the parent terminal is unchanged.
 
 ## Run directly from git
 
@@ -122,7 +145,7 @@ cat dmft/run_dmft.pbs
 qsub dmft/run_dmft.pbs
 ```
 
-`prepare-dmft` validates converged DFT + `indmf/indmfl/indmfi`, runs `dmft_copy.py SOURCE` from inside `dmft/`, supplements potential files omitted by upstream `dmft_copy.py`, prepares `params.dat`, runs official `szero.py` for the initial `sig.inp`, and performs a final READY gate.
+`prepare-dmft` validates converged DFT + `indmf/indmfl/indmfi`, invokes official `dmft_copy.py SOURCE` from inside `dmft/`, supplements potential files omitted by upstream `dmft_copy.py`, prepares `params.dat`, invokes official `szero.py` for the initial `sig.inp`, and performs a final READY gate. These helper invocations use the lightweight child-process policy; the full Intel/MKL/MPI runtime is only in `run_dmft.pbs`.
 
 ## DMFT checks
 
@@ -152,6 +175,8 @@ sig.inpx
         +
 maxent_params.dat
 ```
+
+`saverage.py` is a lightweight prepare helper; MaxEnt itself is not run during preparation.
 
 Inspect and validate before freezing a PBS script:
 
@@ -293,6 +318,9 @@ dmft/analysis/summary.md
 ## Safety rules
 
 - workflow never calls `qsub`;
+- workflow never mutates the user's login shell or persistent shell configuration;
+- prepare helpers do not source Intel/MKL or rewrite PATH/LD_LIBRARY_PATH/PYTHONPATH;
+- full Intel/MKL/MPI setup is confined to generated heavy-job scripts (or explicit legacy foreground numerical runners);
 - generated PBS files are standalone and contain resolved official commands;
 - PBS jobs do not import this project or read `config.toml` at runtime;
 - preparation and PBS generation are separate so native inputs can be inspected/edited first;
