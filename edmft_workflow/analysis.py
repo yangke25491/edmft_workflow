@@ -114,14 +114,18 @@ def analyze_convergence(cfg) -> tuple[list[Path], dict]:
     return created, report
 
 
-def _fit_z(omega: np.ndarray, imag_sigma: np.ndarray, nfit: int) -> tuple[float, float, float, float]:
+def _fit_z(
+    omega: np.ndarray,
+    imag_sigma: np.ndarray,
+    nfit: int,
+) -> tuple[float, float, float, float, float]:
     if nfit < 2:
         raise WorkflowError("analysis.z_fit_points must be >= 2")
     n = min(nfit, len(omega))
     x = np.asarray(omega[:n], float)
     y = np.asarray(imag_sigma[:n], float)
     if len(x) < 2:
-        return math.nan, math.nan, math.nan, math.nan
+        return math.nan, math.nan, math.nan, math.nan, math.nan
     slope, intercept = np.polyfit(x, y, 1)
     yfit = slope * x + intercept
     ss_res = float(np.sum((y - yfit) ** 2))
