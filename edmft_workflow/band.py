@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import shutil
 
+from .provenance import write_stage_manifest
 from .realaxis import _copy_wien_potentials, _prepare_real_axis_indmfl
 from .utils import WorkflowError, count_klist_points, require_file, run_stage, safe_prepare_dir
 
@@ -42,7 +43,7 @@ def prepare_band(cfg, force: bool = False) -> Path:
     """Prepare an independent real-axis A(k,w) directory; do not run numerical jobs."""
     case = cfg.case
     source = cfg.dmft_dir
-    require_file(source / f"{case}.indmfl")
+    source_indmfl = require_file(source / f"{case}.indmfl")
     require_file(source / "info.iterate")
     sig = require_file(source / "maxent" / "Sig.out")
 
@@ -52,8 +53,10 @@ def prepare_band(cfg, force: bool = False) -> Path:
     # Start from the converged Matsubara DMFT snapshot, not from DOS/onreal.
     # This keeps DOS and band completely independent.
     run_stage(cfg, [dmft_copy, str(source)], cwd=out, log=out / "dmft_copy.log")
-    _copy_wien_potentials(cfg, out)
-    shutil.copy2(sig, out / "sig.inp")
+    potentials = _copy_wien_potentials(cfg, out)
+
+    sig_target = out / "sig.inp"
+    shutil.copy2(sig, sig_target)
 
     ksrc = resolve_klist_source(cfg)
     require_file(ksrc)
@@ -69,11 +72,13 @@ def prepare_band(cfg, force: bool = False) -> Path:
     )
     expected = count_klist_points(ktarget)
 
-    (out / "prepare.log").write_text(
+    prepare_log = out / "prepare.log"
+    prepare_log.write_text(
         "\n".join([
             f"source_dmft={source}",
             f"self_energy_source={sig}",
-            f"self_energy_target={out / 'sig.inp'}",
+            f"self_energy_target={sig_target}",
+            f"indmfl_source={source_indmfl}",
             f"klist_source={ksrc}",
             f"klist_target={ktarget}",
             f"kpoints={expected}",
@@ -86,10 +91,22 @@ def prepare_band(cfg, force: bool = False) -> Path:
         encoding="utf-8",
     )
 
+    manifest = write_stage_manifest(
+        out,
+        "band",
+        sources={
+            "matsubara_indmfl": source_indmfl,
+            "real_axis_self_energy": sig,
+            "klist_band": ksrc,
+        },
+        prepared=[backup, indmfl, sig_target, ktarget, out / "indmfl.diff", prepare_log, *potentials],
+    )
+
     print(f"Band directory prepared: {out}")
     print(f"Band path source: {ksrc}")
     print(f"Band path contains {expected} k points")
-    print(f"Self-energy: {sig} -> {out / 'sig.inp'}")
+    print(f"Self-energy: {sig} -> {sig_target}")
     print("indmfl Matsubara flag: 1 -> 0")
     print(f"Review changes: {out / 'indmfl.diff'}")
+    print(f"Provenance manifest: {manifest}")
     return out
