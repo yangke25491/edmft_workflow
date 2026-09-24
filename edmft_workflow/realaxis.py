@@ -4,6 +4,7 @@ from pathlib import Path
 import difflib
 import shutil
 
+from .provenance import write_stage_manifest
 from .utils import (
     WorkflowError, copy_case_files, patch_indmfl, require_file,
     run_stage, safe_prepare_dir,
@@ -21,7 +22,7 @@ def _edmft_command(cfg, name: str) -> str:
     return str(Path(str(root)) / name)
 
 
-def _copy_wien_potentials(cfg, out: Path) -> None:
+def _copy_wien_potentials(cfg, out: Path) -> list[Path]:
     """Copy converged potentials so real-axis work cannot modify dmft/."""
     case = cfg.case
     copy_case_files(cfg.dmft_dir, out, case, ["vsp", "vns"], required=False)
@@ -38,6 +39,12 @@ def _copy_wien_potentials(cfg, out: Path) -> None:
             "Real-axis directory needs converged potential files: case.vsp+case.vns "
             "or vspup/vspdn/vnsup/vnsdn."
         )
+    copied = []
+    for suffix in ("vsp", "vns", "vspup", "vspdn", "vnsup", "vnsdn", "vrespsum"):
+        p = out / f"{case}.{suffix}"
+        if p.is_file() and p.stat().st_size > 0:
+            copied.append(p)
+    return copied
 
 
 def _indmfl_flag(path: Path) -> int:
@@ -55,9 +62,10 @@ def _prepare_real_axis_indmfl(path: Path, nomega: int, wmin: float, wmax: float)
     """Preserve the Matsubara input and make the documented 1 -> 0 switch."""
     require_file(path)
     before = path.read_text(encoding="utf-8").splitlines(keepends=True)
-    if _indmfl_flag(path) != 1:
+    original_flag = _indmfl_flag(path)
+    if original_flag != 1:
         raise WorkflowError(
-            f"Expected Matsubara flag 1 before real-axis conversion, found {_indmfl_flag(path)} in {path}"
+            f"Expected Matsubara flag 1 before real-axis conversion, found {original_flag} in {path}"
         )
 
     backup = path.with_name(path.name + ".matsubara")
@@ -79,7 +87,7 @@ def prepare_dos(cfg, force: bool = False) -> Path:
     """Prepare a standalone real-axis DOS directory; do not run numerical jobs."""
     case = cfg.case
     source = cfg.dmft_dir
-    require_file(source / f"{case}.indmfl")
+    source_indmfl = require_file(source / f"{case}.indmfl")
     require_file(source / "info.iterate")
     sig = require_file(source / "maxent" / "Sig.out")
 
@@ -88,10 +96,11 @@ def prepare_dos(cfg, force: bool = False) -> Path:
 
     # Official semantics: dmft_copy.py SOURCE copies SOURCE into cwd.
     run_stage(cfg, [dmft_copy, str(source)], cwd=out, log=out / "dmft_copy.log")
-    _copy_wien_potentials(cfg, out)
+    potentials = _copy_wien_potentials(cfg, out)
 
     # The continued real-axis self-energy is named sig.inp for dmft1/dmftp.
-    shutil.copy2(sig, out / "sig.inp")
+    sig_target = out / "sig.inp"
+    shutil.copy2(sig, sig_target)
 
     indmfl = require_file(out / f"{case}.indmfl")
     backup = _prepare_real_axis_indmfl(
@@ -101,11 +110,13 @@ def prepare_dos(cfg, force: bool = False) -> Path:
         wmax=float(cfg.get("dos.wmax", 1.0)),
     )
 
-    (out / "prepare.log").write_text(
+    prepare_log = out / "prepare.log"
+    prepare_log.write_text(
         "\n".join([
             f"source_dmft={source}",
             f"self_energy_source={sig}",
-            f"self_energy_target={out / 'sig.inp'}",
+            f"self_energy_target={sig_target}",
+            f"indmfl_source={source_indmfl}",
             f"indmfl_backup={backup}",
             "matsubara_flag=0",
             f"nomega={int(cfg.get('dos.nomega', 200))}",
@@ -115,9 +126,20 @@ def prepare_dos(cfg, force: bool = False) -> Path:
         encoding="utf-8",
     )
 
+    manifest = write_stage_manifest(
+        out,
+        "dos",
+        sources={
+            "matsubara_indmfl": source_indmfl,
+            "real_axis_self_energy": sig,
+        },
+        prepared=[backup, indmfl, sig_target, out / "indmfl.diff", prepare_log, *potentials],
+    )
+
     print(f"Real-axis DOS directory prepared: {out}")
-    print(f"Self-energy: {sig} -> {out / 'sig.inp'}")
+    print(f"Self-energy: {sig} -> {sig_target}")
     print(f"indmfl Matsubara backup: {backup}")
     print("indmfl Matsubara flag: 1 -> 0")
     print(f"Review changes: {out / 'indmfl.diff'}")
+    print(f"Provenance manifest: {manifest}")
     return out
