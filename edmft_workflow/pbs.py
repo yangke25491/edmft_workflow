@@ -4,6 +4,7 @@ from pathlib import Path
 import shlex
 import time
 
+from .provenance import refresh_stage_manifest
 from .utils import WorkflowError, shell_preamble
 
 
@@ -176,7 +177,10 @@ def write_pbs(cfg, stage: str, force: bool = False) -> Path:
         path.rename(backup)
         print(f"[backup] {path} -> {backup}")
     path.write_text(render_pbs(cfg, stage), encoding="utf-8")
+    manifest = refresh_stage_manifest(out, extra_prepared=[path])
     print(f"Standalone PBS written: {path}")
+    if manifest is not None:
+        print(f"Manifest refreshed at PBS freeze point: {manifest}")
     print(f"Inspect: cat {path}")
     print(f"Submit manually: qsub {path}")
     return path
