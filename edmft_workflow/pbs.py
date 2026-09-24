@@ -61,6 +61,77 @@ def _maxent_mpi_launcher(cfg) -> str | None:
     return text or None
 
 
+def _maxent_preamble(cfg, cwd: Path, scratch: Path) -> str:
+    """Render a Python/MaxEnt runtime without injecting Intel MPI.
+
+    MaxEnt is a Python/mpi4py stage. The user's mpi4py can be built against Open
+    MPI even when WIEN2k/eDMFT binaries use Intel MPI. Therefore this preamble
+    deliberately omits Intel MPI bin/lib paths and I_MPI_* variables. It keeps
+    the compiler/MKL runtime libraries that compiled MaxEnt extensions may need,
+    plus the configured Python environment library directory.
+    """
+    lines = ["set -e", f"cd {shlex.quote(str(cwd))}"]
+
+    wienroot = cfg.get("environment.wienroot")
+    edmft_root = cfg.get("environment.edmft_root")
+    pybin = cfg.get("environment.python_bin_dir")
+    python = cfg.get("environment.python")
+    intel_root = cfg.get("environment.intel_root")
+    fftw_lib = cfg.get("environment.fftw_lib")
+
+    if wienroot:
+        lines.append(f"export WIENROOT={shlex.quote(str(wienroot))}")
+    if edmft_root:
+        lines.append(f"export WIEN_DMFT_ROOT={shlex.quote(str(edmft_root))}")
+
+    path_parts = [x for x in (edmft_root, wienroot, pybin, "/usr/bin", "/bin") if x]
+    if path_parts:
+        lines.append("export PATH=" + shlex.quote(":".join(str(x) for x in path_parts)))
+
+    ld_parts: list[str] = []
+    if intel_root:
+        intel = Path(str(intel_root)).expanduser()
+        ld_parts += [
+            str(intel / "linux/mkl/lib/intel64"),
+            str(intel / "linux/compiler/lib/intel64_lin"),
+        ]
+    if fftw_lib:
+        ld_parts.append(str(fftw_lib))
+    if python:
+        p = Path(str(python)).expanduser()
+        if p.parent.name == "bin":
+            ld_parts.append(str(p.parent.parent / "lib"))
+    if ld_parts:
+        lines.append(
+            "export LD_LIBRARY_PATH="
+            + shlex.quote(":".join(ld_parts))
+            + ":${LD_LIBRARY_PATH:-}"
+        )
+
+    if edmft_root:
+        lines.append(
+            f"export PYTHONPATH={shlex.quote(str(edmft_root))}${{PYTHONPATH:+:${{PYTHONPATH}}}}"
+        )
+
+    stack = cfg.get("environment.ulimit_stack", "unlimited")
+    core = cfg.get("environment.ulimit_core", "unlimited")
+    if stack:
+        lines.append(f"ulimit -s {shlex.quote(str(stack))}")
+    if core:
+        lines.append(f"ulimit -c {shlex.quote(str(core))}")
+
+    lines.append(f"mkdir -p {shlex.quote(str(scratch))}")
+    lines.append(f"export SCRATCH={shlex.quote(str(scratch))}")
+
+    extra = cfg.section("environment_extra")
+    lines.append(f"export OMP_NUM_THREADS={shlex.quote(str(extra.get('OMP_NUM_THREADS', '1')))}")
+    lines.append(f"export MKL_NUM_THREADS={shlex.quote(str(extra.get('MKL_NUM_THREADS', '1')))}")
+    for key, value in cfg.section("maxent_environment_extra").items():
+        lines.append(f"export {key}={shlex.quote(str(value))}")
+
+    return "\n".join(lines)
+
+
 def _mpi_prefix_lines(cfg) -> list[str]:
     launcher = _mpi_launcher(cfg)
     npflag = str(cfg.get("parallel.mpi_np_flag", "-np"))
@@ -115,10 +186,11 @@ def _native_commands(cfg, stage: str) -> list[str]:
         launcher = _maxent_mpi_launcher(cfg)
         if launcher is None:
             # Match upstream to_real_axis.py: invoke maxent_run.py directly.
-            # mpi4py then initializes a singleton COMM_WORLD instead of being
-            # forced through the (possibly incompatible) eDMFT MPI launcher.
+            # Remove stale MPI bootstrap variables so mpi4py starts as a clean
+            # singleton communicator instead of interpreting another MPI stack.
             return [
                 'echo "MaxEnt launch mode: direct Python (upstream-compatible; no external mpirun)"',
+                "unset PMI_SIZE PMI_RANK PMI_FD PMIX_RANK OMPI_COMM_WORLD_SIZE OMPI_COMM_WORLD_RANK || true",
                 f"{py} {maxent} sig.inpx > maxent.out 2>&1",
                 "test -s Sig.out",
             ]
@@ -196,9 +268,14 @@ def render_pbs(cfg, stage: str) -> str:
             "# to an MPI implementation that matches this Python's mpi4py build.",
         ]
 
+    if stage == "maxent":
+        preamble = _maxent_preamble(cfg, cwd, scratch)
+    else:
+        preamble = shell_preamble(cfg, cwd, scratch=scratch)
+
     lines += [
         "",
-        shell_preamble(cfg, cwd, scratch=scratch),
+        preamble,
         "",
         'echo "PBS_JOBID=${PBS_JOBID:-none}"',
         'echo "PBS_NODEFILE=${PBS_NODEFILE:-none}"',
