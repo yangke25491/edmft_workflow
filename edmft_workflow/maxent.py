@@ -107,12 +107,12 @@ def prepare_maxent(cfg, force: bool = False) -> Path:
     run_edmft_helper(
         cfg,
         "saverage.py",
-        [*[p.name for p in local_files], "-o", "Sig.average"],
+        [*[p.name for p in local_files], "-o", "sig.inpx"],
         cwd=out,
         log=out / "saverage.log",
     )
-    sig_average = require_file(out / "Sig.average")
-    nb = active_maxent_baths(sig_average)
+    siginpx = require_file(out / "sig.inpx")
+    nb = active_maxent_baths(siginpx)
 
     inputs = cfg.root_dir / "inputs"
     supplied = inputs / "maxent_params.dat"
@@ -131,17 +131,17 @@ def prepare_maxent(cfg, force: bool = False) -> Path:
         out,
         "maxent",
         sources=sources,
-        prepared=[selected, sig_average, target],
+        prepared=[selected, siginpx, target],
     )
 
     print("Selected self-energies:")
     for p in local_files:
         print(f"  {p.name}")
-    print(f"Averaged Matsubara self-energy : {sig_average}")
+    print(f"Averaged Matsubara self-energy : {siginpx}")
     print(f"Active MaxEnt baths/channels   : {nb}")
     print(f"Useful MaxEnt MPI ranks        : <= {max(1, nb)}")
     print(f"MaxEnt parameter file          : {target}")
     print(f"Parameter source               : {origin}")
     print(f"Provenance manifest            : {manifest}")
-    print("Inspect Sig.average and maxent_params.dat before generating the PBS job.")
+    print("Inspect sig.inpx and maxent_params.dat before generating the PBS job.")
     return out
