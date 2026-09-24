@@ -108,15 +108,14 @@ def test_post_pbs_is_standalone_and_uses_native_commands(tmp_path):
         assert "-m edmft_workflow" not in script
         assert "config.toml" not in script
 
-    # MaxEnt mirrors the user's validated cluster script: activate the same
-    # conda env, write mpi_prefix.dat for bookkeeping, but launch maxent_run.py
-    # directly with Python. That produces mpi4py rank=0 size=1 and avoids
-    # mixing Intel mpirun with an Open-MPI-built mpi4py.
-    assert "source /opt/miniforge3/etc/profile.d/conda.sh" in maxent
-    assert "conda activate edmft" in maxent
-    assert 'echo "/opt/intel/bin/mpirun -np $NP" > mpi_prefix.dat' in maxent
-    assert "python /opt/edmft/maxent_run.py Sig.average > sig1.out 2>&1" in maxent
-    assert "$MPI -np" not in maxent
+    # Native eDMFT keeps Intel MPI, but MaxEnt uses the MPI installed beside the
+    # configured Python so mpi4py and mpirun share the same MPI implementation.
+    assert "MAXENT_MPI=/opt/miniforge3/envs/edmft/bin/mpirun" in maxent
+    assert "/opt/intel/bin/mpirun" not in maxent
+    assert "unset I_MPI_HYDRA_BOOTSTRAP I_MPI_FABRICS" in maxent
+    assert "linux/mpi/intel64/lib" not in maxent
+    assert "--hostfile maxent.hosts" in maxent
+    assert '"$PYTHON" /opt/edmft/maxent_run.py Sig.average' in maxent
     assert "Sig.average" in maxent
 
     assert "/opt/wien2k/x_lapw" in dos
@@ -124,3 +123,15 @@ def test_post_pbs_is_standalone_and_uses_native_commands(tmp_path):
     assert "/opt/edmft/x_dmft.py dmft1" in dos
     assert "/opt/edmft/x_dmft.py lapw1 --band" in band
     assert "/opt/edmft/x_dmft.py dmftp" in band
+
+
+def test_maxent_can_override_matching_mpi_launcher(tmp_path):
+    cfg = make_cfg(tmp_path)
+    cfg.data["maxent"] = {
+        "mpi_launcher": "/custom/openmpi/bin/mpirun",
+        "mpi_np_flag": "-np",
+    }
+    (cfg.dmft_dir / "maxent").mkdir(parents=True, exist_ok=True)
+    text = render_pbs(cfg, "maxent")
+    assert "MAXENT_MPI=/custom/openmpi/bin/mpirun" in text
+    assert "/opt/intel/bin/mpirun" not in text
