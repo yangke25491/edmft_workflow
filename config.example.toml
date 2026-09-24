@@ -94,20 +94,16 @@ average_last = 3
 # Preferred: PROJECT/inputs/maxent_params.dat.
 # If absent, prepare-maxent writes the current upstream maxent_run.py template
 # into dmft/maxent/maxent_params.dat for explicit inspection/editing.
+# prepare-maxent writes the averaged self-energy as dmft/maxent/Sig.average.
 
 [maxent]
-# IMPORTANT: MaxEnt uses Python mpi4py, whose MPI vendor may differ from the
-# Intel MPI used by WIEN2k/eDMFT. Therefore MaxEnt does NOT inherit
-# parallel.mpi_launcher.
-#
-# Default = upstream-compatible direct invocation:
-#   python maxent_run.py sig.inpx
-# This gives mpi4py a singleton COMM_WORLD and avoids mixing MPI vendors.
-#
-# Enable parallel MaxEnt only after verifying that the launcher matches the MPI
-# vendor reported by this exact Python environment's mpi4py, e.g.:
-# mpi_launcher = "/home/USER/miniforge3/envs/edmft/bin/mpirun"
-# mpi_np_flag = "-np"
+# The validated cluster baseline runs:
+#   python $WIEN_DMFT_ROOT/maxent_run.py Sig.average > sig1.out 2>&1
+# after activating the configured conda environment.
+# mpi_prefix.dat is also written for consistency with the eDMFT work directory,
+# but maxent_run.py does not read it. The validated baseline therefore reports
+# mpi4py rank=0 size=1. Keep this serial baseline until a matching mpi4py/MPI
+# launcher is separately validated.
 
 [dos]
 # prepare-dos copies the Matsubara indmfl, preserves a backup, then changes
@@ -163,8 +159,7 @@ mem = ""
 
 [pbs_maxent]
 job_name = "MaxEnt"
-# Default direct-Python MaxEnt launches one process. Increase this only when
-# maxent.mpi_launcher is explicitly set to an mpi4py-compatible MPI launcher.
+# The validated direct-Python MaxEnt baseline is serial.
 ppn = 1
 walltime = "04:00:00"
 mem = ""
