@@ -105,10 +105,29 @@ def test_post_pbs_is_standalone_and_uses_native_commands(tmp_path):
         assert "-m edmft_workflow" not in script
         assert "config.toml" not in script
 
+    # MaxEnt must not inherit the Intel MPI launcher used by native eDMFT.
     assert "/opt/edmft/maxent_run.py" in maxent
     assert "sig.inpx" in maxent
+    assert "MaxEnt launch mode: direct Python" in maxent
+    assert "/opt/intel/bin/mpirun" not in maxent.split("MaxEnt launch mode:", 1)[1]
+
     assert "/opt/wien2k/x_lapw" in dos
     assert "/opt/edmft/x_dmft.py lapw1" in dos
     assert "/opt/edmft/x_dmft.py dmft1" in dos
     assert "/opt/edmft/x_dmft.py lapw1 --band" in band
     assert "/opt/edmft/x_dmft.py dmftp" in band
+
+
+def test_maxent_parallel_requires_its_own_explicit_launcher(tmp_path):
+    cfg = make_cfg(tmp_path)
+    (cfg.dmft_dir / "maxent").mkdir(parents=True, exist_ok=True)
+    cfg.data["maxent"] = {
+        "mpi_launcher": "/opt/openmpi/bin/mpirun",
+        "mpi_np_flag": "-np",
+    }
+
+    text = render_pbs(cfg, "maxent")
+    native = text.split("MaxEnt launch mode:", 1)[1]
+    assert "explicit mpi4py-compatible MPI" in native
+    assert "/opt/openmpi/bin/mpirun" in native
+    assert "/opt/intel/bin/mpirun" not in native
