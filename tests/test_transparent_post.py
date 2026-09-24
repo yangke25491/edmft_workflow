@@ -4,6 +4,7 @@ from edmft_workflow.config import WorkflowConfig
 from edmft_workflow.maxent import OFFICIAL_MAXENT_PARAMS
 from edmft_workflow.pbs import render_pbs
 from edmft_workflow.realaxis import _indmfl_flag, _prepare_real_axis_indmfl
+from edmft_workflow.utils import build_helper_env, edmft_helper_command, shell_preamble
 
 
 def make_cfg(tmp_path: Path) -> WorkflowConfig:
@@ -29,6 +30,40 @@ def test_upstream_maxent_template_is_explicit_python():
     assert params["Nw"] == 450
     assert params["Nitt"] == 500
     assert params["SymCum"] is True
+
+
+def test_prepare_helper_uses_absolute_python_and_minimal_environment(tmp_path):
+    cfg = make_cfg(tmp_path)
+    cmd = edmft_helper_command(cfg, "saverage.py")
+    assert cmd == ["/opt/python/bin/python", "/opt/edmft/saverage.py"]
+
+    scratch = tmp_path / "scratch"
+    env = build_helper_env(cfg, scratch=scratch)
+    assert env == {
+        "WIENROOT": "/opt/wien2k",
+        "WIEN_DMFT_ROOT": "/opt/edmft",
+        "SCRATCH": str(scratch.resolve()),
+    }
+    assert "PATH" not in env
+    assert "LD_LIBRARY_PATH" not in env
+    assert "PYTHONPATH" not in env
+    assert "OMP_NUM_THREADS" not in env
+    assert "MKL_NUM_THREADS" not in env
+    assert not any(key.startswith("I_MPI_") for key in env)
+
+
+def test_full_job_preamble_deduplicates_thread_settings(tmp_path):
+    cfg = make_cfg(tmp_path)
+    cfg.data["environment_extra"] = {
+        "OMP_NUM_THREADS": "2",
+        "MKL_NUM_THREADS": "3",
+        "I_MPI_HYDRA_BOOTSTRAP": "ssh",
+    }
+    text = shell_preamble(cfg, tmp_path)
+    assert text.count("export OMP_NUM_THREADS=") == 1
+    assert text.count("export MKL_NUM_THREADS=") == 1
+    assert "export OMP_NUM_THREADS=2" in text
+    assert "export MKL_NUM_THREADS=3" in text
 
 
 def test_real_axis_conversion_preserves_matsubara_backup(tmp_path):
