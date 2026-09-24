@@ -34,6 +34,8 @@ I_MPI_FABRICS = "shm"
 [parallel]
 mpi_launcher = "/opt/intel2019/compilers_and_libraries_2019.4.243/linux/mpi/intel64/bin/mpirun"
 mpi_np_flag = "-np"
+# Post-processing x_dmft.py installations commonly use mpi_prefix.dat2 for LAPW1.
+# Keep this explicit so generated PBS files are easy to inspect.
 write_mpi_prefix2 = true
 wien_machines_mode = "single_node_compact"
 dmft_wien_machines = false
@@ -96,6 +98,11 @@ wmax = 6.0
 # Fallback example only:
 klist_source = "@wien:fcc.klist"
 
+[analysis]
+# Low-frequency Matsubara points used for the diagnostic linear fit of ImSigma
+# when reporting Z and 1/Z. Always inspect the fit/R^2 before physical use.
+z_fit_points = 4
+
 [plot]
 orbital_labels = ["eg", "t2g"]
 cdos_labels = ["Total DOS", "Mn-d"]
@@ -105,8 +112,9 @@ akw_intensity = 0.97
 drop_klabels = ["LAMBDA", "DELTA", "Z"]
 
 # PBS settings are used only when GENERATING standalone scripts.
-# Generated jobs do not read config.toml and do not call workflow.py.
-# The user submits them manually with qsub.
+# Preparation and PBS generation are intentionally separate:
+#   prepare-maxent -> inspect/edit -> pbs maxent -> inspect -> qsub manually
+# The generated jobs do not read config.toml and do not call workflow.py.
 [pbs]
 queue = "batch"
 nodes = 1
