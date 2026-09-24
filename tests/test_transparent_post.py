@@ -1,10 +1,13 @@
 from pathlib import Path
 
+import pytest
+
 from edmft_workflow.config import WorkflowConfig
+from edmft_workflow.foreground import render_foreground
 from edmft_workflow.maxent import OFFICIAL_MAXENT_PARAMS
 from edmft_workflow.pbs import render_pbs
 from edmft_workflow.realaxis import _indmfl_flag, _prepare_real_axis_indmfl
-from edmft_workflow.utils import build_helper_env, edmft_helper_command, shell_preamble
+from edmft_workflow.utils import WorkflowError, build_helper_env, edmft_helper_command, shell_preamble
 
 
 def make_cfg(tmp_path: Path) -> WorkflowConfig:
@@ -20,7 +23,9 @@ def make_cfg(tmp_path: Path) -> WorkflowConfig:
             "fftw_lib": "/opt/fftw/lib",
         },
         "parallel": {"mpi_launcher": "/opt/intel/bin/mpirun", "write_mpi_prefix2": True},
+        "foreground": {"dos_np": 6, "band_np": 7},
         "pbs": {"queue": "batch", "nodes": 1, "ppn": 4, "walltime": "01:00:00"},
+        "pbs_maxent": {"ppn": 2},
     }
     return WorkflowConfig(data=data, source=tmp_path / "config.toml")
 
@@ -91,41 +96,52 @@ def test_real_axis_conversion_preserves_matsubara_backup(tmp_path):
     assert "dft.indmfl" in diff
 
 
-def test_post_pbs_is_standalone_and_uses_native_commands(tmp_path):
+def test_maxent_pbs_matches_validated_openmpi_launch(tmp_path):
     cfg = make_cfg(tmp_path)
-    for stage_dir in [
-        cfg.dmft_dir / "maxent",
-        cfg.dmft_dir / "onreal",
-        cfg.dmft_dir / "band",
-    ]:
-        stage_dir.mkdir(parents=True, exist_ok=True)
+    (cfg.dmft_dir / "maxent").mkdir(parents=True, exist_ok=True)
 
-    maxent = render_pbs(cfg, "maxent")
-    dos = render_pbs(cfg, "dos")
-    band = render_pbs(cfg, "band")
+    text = render_pbs(cfg, "maxent")
 
-    for script in (maxent, dos, band):
-        assert "-m edmft_workflow" not in script
-        assert "config.toml" not in script
+    assert "#PBS -l nodes=1:ppn=2" in text
+    assert "source \"$INTEL/linux/bin/compilervars.sh\" intel64" in text
+    assert "source /opt/miniforge3/etc/profile.d/conda.sh" in text
+    assert "conda activate edmft" in text
+    assert "linux/mpi/intel64/lib/release" in text
+    assert "MPI=/opt/miniforge3/envs/edmft/bin/mpirun" in text
+    assert 'echo "$MPI -np $NP" > mpi_prefix.dat' in text
+    assert '"$MPI" -np "$NP" "$ENV/bin/python" /opt/edmft/maxent_run.py sig.inpx > sig1.out 2>&1' in text
+    assert "--hostfile" not in text
+    assert "Sig.average" not in text
 
-    # Native eDMFT keeps Intel MPI, but MaxEnt uses the MPI installed beside the
-    # configured Python so mpi4py and mpirun share the same MPI implementation.
-    assert "MAXENT_MPI=/opt/miniforge3/envs/edmft/bin/mpirun" in maxent
-    assert "/opt/intel/bin/mpirun" not in maxent
-    assert "unset I_MPI_HYDRA_BOOTSTRAP I_MPI_FABRICS" in maxent
-    assert "linux/mpi/intel64/lib" not in maxent
-    assert "--hostfile maxent.hosts" in maxent
-    assert '"$PYTHON" /opt/edmft/maxent_run.py Sig.average' in maxent
-    assert "Sig.average" in maxent
 
-    assert "/opt/wien2k/x_lapw" in dos
+def test_pbs_is_reserved_for_heavy_stages(tmp_path):
+    cfg = make_cfg(tmp_path)
+    with pytest.raises(WorkflowError):
+        render_pbs(cfg, "dos")
+    with pytest.raises(WorkflowError):
+        render_pbs(cfg, "band")
+
+
+def test_dos_and_band_render_as_foreground_mpi(tmp_path):
+    cfg = make_cfg(tmp_path)
+    dos = render_foreground(cfg, "dos")
+    band = render_foreground(cfg, "band")
+
+    assert "NP=6" in dos
+    assert "MPI=/opt/intel/bin/mpirun" in dos
+    assert 'echo "$MPI -np $NP" > mpi_prefix.dat' in dos
+    assert "cp mpi_prefix.dat mpi_prefix.dat2" in dos
+    assert "/opt/wien2k/x_lapw -f dft lapw0" in dos
     assert "/opt/edmft/x_dmft.py lapw1" in dos
     assert "/opt/edmft/x_dmft.py dmft1" in dos
+
+    assert "NP=7" in band
+    assert "MPI=/opt/intel/bin/mpirun" in band
     assert "/opt/edmft/x_dmft.py lapw1 --band" in band
     assert "/opt/edmft/x_dmft.py dmftp" in band
 
 
-def test_maxent_can_override_matching_mpi_launcher(tmp_path):
+def test_maxent_can_override_matching_openmpi_launcher(tmp_path):
     cfg = make_cfg(tmp_path)
     cfg.data["maxent"] = {
         "mpi_launcher": "/custom/openmpi/bin/mpirun",
@@ -133,5 +149,5 @@ def test_maxent_can_override_matching_mpi_launcher(tmp_path):
     }
     (cfg.dmft_dir / "maxent").mkdir(parents=True, exist_ok=True)
     text = render_pbs(cfg, "maxent")
-    assert "MAXENT_MPI=/custom/openmpi/bin/mpirun" in text
-    assert "/opt/intel/bin/mpirun" not in text
+    assert "MPI=/custom/openmpi/bin/mpirun" in text
+    assert '"$MPI" -np "$NP"' in text
