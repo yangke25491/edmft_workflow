@@ -68,10 +68,9 @@ def validate_same_grid(files: list[Path]) -> None:
 def prepare_maxent(cfg, force: bool = False) -> Path:
     """Prepare official MaxEnt inputs without running the expensive continuation.
 
-    The only upstream executable used during preparation is saverage.py. It is
-    launched through the configured Python and absolute eDMFT script path with
-    minimal child-only environment; Intel/MKL/MPI setup is reserved for the
-    later standalone run_maxent.pbs job.
+    The selected Matsubara self-energies are averaged with upstream saverage.py
+    into ``Sig.average``. This filename is explicit and mirrors the validated
+    manual workflow. The later PBS job runs ``maxent_run.py Sig.average``.
     """
     report = convergence_report(
         cfg.dmft_dir,
@@ -103,11 +102,11 @@ def prepare_maxent(cfg, force: bool = False) -> Path:
     run_edmft_helper(
         cfg,
         "saverage.py",
-        [*[p.name for p in local_files], "-o", "sig.inpx"],
+        [*[p.name for p in local_files], "-o", "Sig.average"],
         cwd=out,
         log=out / "saverage.log",
     )
-    siginpx = require_file(out / "sig.inpx")
+    sig_average = require_file(out / "Sig.average")
 
     inputs = cfg.root_dir / "inputs"
     supplied = inputs / "maxent_params.dat"
@@ -126,15 +125,15 @@ def prepare_maxent(cfg, force: bool = False) -> Path:
         out,
         "maxent",
         sources=sources,
-        prepared=[selected, siginpx, target],
+        prepared=[selected, sig_average, target],
     )
 
     print("Selected self-energies:")
     for p in local_files:
         print(f"  {p.name}")
-    print(f"Averaged Matsubara self-energy : {siginpx}")
+    print(f"Averaged Matsubara self-energy : {sig_average}")
     print(f"MaxEnt parameter file          : {target}")
     print(f"Parameter source               : {origin}")
     print(f"Provenance manifest            : {manifest}")
-    print("Inspect sig.inpx and maxent_params.dat before generating the PBS job.")
+    print("Inspect Sig.average and maxent_params.dat before generating the PBS job.")
     return out
