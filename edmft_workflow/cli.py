@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import sys
 
+from .analysis import run_analysis
 from .config import ConfigError, load_config
 from .utils import WorkflowError
 from .checks import convergence_report, doctor, format_convergence
@@ -11,7 +12,6 @@ from .production import init_layout, prepare_dmft
 from .maxent import prepare_maxent
 from .realaxis import prepare_dos
 from .band import prepare_band
-from .plotting import plot_akw, plot_dos, plot_self_energy
 from .pbs import write_pbs
 
 
@@ -57,7 +57,7 @@ def _build_parser() -> argparse.ArgumentParser:
     runp = sub.add_parser("run", help="Foreground-only lightweight operations")
     runp.add_argument("stage", choices=["plots"])
 
-    analyze = sub.add_parser("analyze", help="Generate common post-processing figures in the foreground")
+    analyze = sub.add_parser("analyze", help="Generate common scientific diagnostics in the foreground")
     analyze.add_argument("stage", nargs="?", choices=["all"], default="all")
     return p
 
@@ -81,7 +81,7 @@ def _status(cfg) -> None:
         ("DOS complete", cfg.dmft_dir / "onreal" / f"{case}.cdos"),
         ("Band prepared", cfg.dmft_dir / "band" / "run_band.pbs"),
         ("Band complete", cfg.dmft_dir / "band" / "eigvals.dat"),
-        ("Analysis", cfg.dmft_dir / "results"),
+        ("Analysis", cfg.dmft_dir / "analysis" / "summary.md"),
     ]
     for label, path in stages:
         if path.is_dir():
@@ -108,12 +108,7 @@ def _prepare_with_pbs(cfg, stage: str, force: bool) -> None:
 
 
 def _analyze(cfg) -> None:
-    created = []
-    created += plot_self_energy(cfg)
-    if (cfg.dmft_dir / "onreal").exists():
-        created += plot_dos(cfg)
-    if (cfg.dmft_dir / "band" / "eigvals.dat").exists():
-        created.append(plot_akw(cfg))
+    created = run_analysis(cfg)
     print("Analysis outputs:")
     for p in created:
         print(f"  {p}")
