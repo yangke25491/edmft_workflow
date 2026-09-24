@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
-import re
 import shlex
-import subprocess
+import time
 
 from .utils import WorkflowError, shell_preamble
 
@@ -16,20 +15,108 @@ def _stage_resources(cfg, stage: str) -> dict:
     return out
 
 
-def _stage_cwd_and_scratch(cfg, stage: str) -> tuple[Path, Path]:
+def _stage_dir(cfg, stage: str) -> Path:
     if stage == "dft":
-        return cfg.dft_dir, cfg.scratch_dir
+        return cfg.dft_dir
     if stage == "dmft":
-        # Reproduce the validated run_dmft PBS convention:
-        #   cd $PBS_O_WORKDIR (= dmft/)
-        #   SCRATCH=$PBS_O_WORKDIR/tmp
-        return cfg.dmft_dir, cfg.dmft_scratch_dir
-    if stage in {"maxent", "dos", "band"}:
-        return cfg.dmft_dir, cfg.dmft_dir
+        return cfg.dmft_dir
+    if stage == "maxent":
+        return cfg.dmft_dir / "maxent"
+    if stage == "dos":
+        return cfg.dmft_dir / "onreal"
+    if stage == "band":
+        return cfg.dmft_dir / "band"
     raise WorkflowError(f"Unsupported PBS stage: {stage}")
 
 
-def render_pbs(cfg, stage: str, force: bool = False) -> str:
+def _mpi_launcher(cfg) -> str:
+    configured = cfg.get("parallel.mpi_launcher")
+    if configured:
+        return str(configured)
+    intel = cfg.get("environment.intel_root")
+    if intel:
+        return str(Path(str(intel)) / "linux/mpi/intel64/bin/mpirun")
+    return "mpirun"
+
+
+def _mpi_prefix_lines(cfg) -> list[str]:
+    launcher = _mpi_launcher(cfg)
+    npflag = str(cfg.get("parallel.mpi_np_flag", "-np"))
+    lines = [
+        'NP=$(wc -l < "$PBS_NODEFILE")',
+        f"MPI={shlex.quote(launcher)}",
+        f"echo \"$MPI {npflag} $NP\" > mpi_prefix.dat",
+    ]
+    if bool(cfg.get("parallel.write_mpi_prefix2", True)):
+        lines.append("cp mpi_prefix.dat mpi_prefix.dat2")
+    lines += [
+        'echo "MPI processes=$NP"',
+        'echo "mpi_prefix.dat:"',
+        "cat mpi_prefix.dat",
+    ]
+    return lines
+
+
+def _native_commands(cfg, stage: str) -> list[str]:
+    case = cfg.case
+    wienroot = str(cfg.require("environment.wienroot"))
+    edmft_root = str(cfg.require("environment.edmft_root"))
+    python = str(cfg.get("environment.python", "python"))
+
+    if stage == "dft":
+        cmd = cfg.get("dft.run_command")
+        if cmd:
+            run = str(cmd)
+        else:
+            run = f"{shlex.quote(str(Path(wienroot) / 'run_lapw'))} -p -cc 0.0001 -ec 0.0001 -i 100"
+        return [
+            'NP=$(wc -l < "$PBS_NODEFILE")',
+            'HOST=$(head -n 1 "$PBS_NODEFILE")',
+            'printf "1:%s:%s\\n" "$HOST" "$NP" > .machines',
+            'printf "%s\\n" "granularity:1" "extrafine:1" >> .machines',
+            'echo ".machines:"',
+            'cat .machines',
+            f"{run} > wien2k_run.out 2>&1",
+        ]
+
+    if stage == "dmft":
+        return [
+            *_mpi_prefix_lines(cfg),
+            f"{shlex.quote(python)} {shlex.quote(str(Path(edmft_root) / 'run_dmft.py'))} > dmft.out 2>&1",
+        ]
+
+    if stage == "maxent":
+        return [
+            'NP=$(wc -l < "$PBS_NODEFILE")',
+            f"MPI={shlex.quote(_mpi_launcher(cfg))}",
+            f"$MPI -np \"$NP\" {shlex.quote(python)} {shlex.quote(str(Path(edmft_root) / 'maxent_run.py'))} sig.inpx > maxent.out 2>&1",
+        ]
+
+    if stage == "dos":
+        return [
+            *_mpi_prefix_lines(cfg),
+            f"{shlex.quote(str(Path(wienroot) / 'x_lapw'))} -f {shlex.quote(case)} lapw0 > lapw0.log 2>&1",
+            f"{shlex.quote(str(Path(edmft_root) / 'x_dmft.py'))} lapw1 > lapw1.log 2>&1",
+            f"{shlex.quote(str(Path(edmft_root) / 'x_dmft.py'))} dmft1 > dmft1.log 2>&1",
+        ]
+
+    if stage == "band":
+        return [
+            *_mpi_prefix_lines(cfg),
+            f"{shlex.quote(str(Path(edmft_root) / 'x_dmft.py'))} lapw1 --band > lapw1_band.log 2>&1",
+            f"{shlex.quote(str(Path(edmft_root) / 'x_dmft.py'))} dmftp > dmftp.log 2>&1",
+        ]
+
+    raise WorkflowError(f"Unsupported PBS stage: {stage}")
+
+
+def render_pbs(cfg, stage: str) -> str:
+    """Render a self-contained PBS script.
+
+    The generated job does not import edmft_workflow and does not read
+    config.toml at runtime. It contains only the resolved environment plus
+    WIEN2k/eDMFT commands, so it can be inspected and submitted manually.
+    """
     r = _stage_resources(cfg, stage)
     name = str(r.get("job_name", f"{cfg.case}_{stage}"))
     nodes = int(r.get("nodes", 1))
@@ -37,18 +124,8 @@ def render_pbs(cfg, stage: str, force: bool = False) -> str:
     walltime = str(r.get("walltime", "04:00:00"))
     mem = str(r.get("mem", "")).strip()
     queue = r.get("queue")
-    py = str(cfg.get("environment.python", "python"))
-    repo_root = Path(__file__).resolve().parent.parent
-    config_path = cfg.source.resolve()
-    cwd, scratch = _stage_cwd_and_scratch(cfg, stage)
-
-    cli = (
-        f"{shlex.quote(py)} -m edmft_workflow.cli "
-        f"-c {shlex.quote(str(config_path))}"
-    )
-    cmd = f"{cli} run {stage}"
-    if force and stage in {"maxent", "dos", "band"}:
-        cmd += " --force"
+    cwd = _stage_dir(cfg, stage)
+    scratch = cwd / "tmp"
 
     lines = [
         "#!/bin/bash",
@@ -64,43 +141,36 @@ def render_pbs(cfg, stage: str, force: bool = False) -> str:
 
     lines += [
         "",
-        shell_preamble(cfg, cwd, scratch=scratch),
-        f"export PYTHONPATH={shlex.quote(str(repo_root))}:${{PYTHONPATH:-}}",
+        "# Generated by edmft_workflow. This file is intentionally standalone.",
+        "# Inspect it, then submit manually with: qsub <this-file>",
         "",
-        'echo "===== edmft_workflow runtime preflight ====="',
-        f"{cli} doctor-env",
+        shell_preamble(cfg, cwd, scratch=scratch),
+        "",
         'echo "PBS_JOBID=${PBS_JOBID:-none}"',
         'echo "PBS_NODEFILE=${PBS_NODEFILE:-none}"',
-        'if [ -n "${PBS_NODEFILE:-}" ] && [ -f "$PBS_NODEFILE" ]; then slots=$(wc -l < "$PBS_NODEFILE"); echo "allocated slots=$slots"; fi',
-        'echo "mpirun=$(command -v mpirun)"',
-        'echo "============================================"',
+        'echo "working directory=$PWD"',
         "",
-        cmd,
+        *_native_commands(cfg, stage),
         "",
+        'echo "stage finished with exit code $?"',
     ]
-    return "\n".join(lines)
+    return "\n".join(lines) + "\n"
 
 
 def write_pbs(cfg, stage: str, force: bool = False) -> Path:
-    jobdir = cfg.dmft_dir / ".edmft_jobs"
-    jobdir.mkdir(parents=True, exist_ok=True)
-    path = jobdir / f"{stage}.pbs"
-    path.write_text(render_pbs(cfg, stage, force=force), encoding="utf-8")
+    out = _stage_dir(cfg, stage)
+    if not out.exists():
+        raise WorkflowError(f"Stage directory does not exist: {out}. Prepare the stage first.")
+    path = out / f"run_{stage}.pbs"
+    if path.exists():
+        if not force:
+            raise WorkflowError(f"PBS script already exists: {path}. Use --force to back it up and regenerate it.")
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        backup = path.with_name(path.name + f".bak.{stamp}")
+        path.rename(backup)
+        print(f"[backup] {path} -> {backup}")
+    path.write_text(render_pbs(cfg, stage), encoding="utf-8")
+    print(f"Standalone PBS written: {path}")
+    print(f"Inspect: cat {path}")
+    print(f"Submit manually: qsub {path}")
     return path
-
-
-def submit_pbs(cfg, stage: str, force: bool = False, depends_on: str | None = None) -> str:
-    script = write_pbs(cfg, stage, force=force)
-    qsub = str(cfg.get("pbs.qsub", "qsub"))
-    cmd = [qsub]
-    if depends_on:
-        cmd += ["-W", f"depend=afterok:{depends_on}"]
-    cmd.append(str(script))
-    cp = subprocess.run(cmd, text=True, capture_output=True)
-    if cp.returncode != 0:
-        raise WorkflowError(f"qsub failed for {stage}: {cp.stderr.strip()}")
-    text = cp.stdout.strip()
-    m = re.search(r"([0-9]+(?:\.[A-Za-z0-9_.-]+)?)", text)
-    jobid = m.group(1) if m else text
-    print(f"submitted {stage}: {jobid}")
-    return jobid
