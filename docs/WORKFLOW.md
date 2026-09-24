@@ -176,7 +176,7 @@ last N sig.inp.*.<impurity>
         ↓
 official saverage.py
         ↓
-sig.inpx
+Sig.average
         +
 maxent_params.dat
 ```
@@ -189,6 +189,7 @@ Inspect/edit:
 
 ```bash
 cat dmft/maxent/selected_sigmas.txt
+head dmft/maxent/Sig.average
 cat dmft/maxent/maxent_params.dat
 python /path/to/edmft_workflow/workflow.py -c PROJECT/config.toml doctor maxent
 ```
@@ -198,16 +199,30 @@ Then freeze the PBS:
 ```bash
 python /path/to/edmft_workflow/workflow.py -c PROJECT/config.toml pbs maxent
 cat dmft/maxent/run_maxent.pbs
+```
+
+The generated PBS mirrors the already validated cluster script. It activates the configured conda environment, loads the Intel/MKL runtime used on the cluster, writes `mpi_prefix.dat`, and runs:
+
+```text
+python $WIEN_DMFT_ROOT/maxent_run.py Sig.average > sig1.out 2>&1
+```
+
+Submit manually:
+
+```bash
 qsub dmft/maxent/run_maxent.pbs
 ```
 
-The native compute command is:
+`mpi_prefix.dat` does **not** parallelize this step because upstream `maxent_run.py` does not read it. With the validated direct-Python launch, `mpi4py` reports `rank=0 size=1`. This serial baseline is deliberate because the configured Python environment can have `mpi4py` built against Open MPI while the native WIEN2k/eDMFT stack uses Intel MPI. Forcing that Python through Intel `mpirun` produces a mixed-MPI warning and is not part of the validated baseline.
 
-```text
-maxent_run.py sig.inpx
+Use one PBS slot for this baseline:
+
+```toml
+[pbs_maxent]
+ppn = 1
 ```
 
-with required output:
+Required output:
 
 ```text
 Sig.out
