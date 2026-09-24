@@ -7,6 +7,13 @@
 #   inputs/maxent_params.dat
 #   inputs/CASE.klist_band
 # Native files take priority over generated fallbacks.
+#
+# Environment policy:
+# - prepare-* never modifies your login shell and does not source Intel/MKL.
+# - lightweight eDMFT helpers are called through the absolute configured Python
+#   and eDMFT script paths with only minimal child-process variables.
+# - the full Intel/MKL/MPI/WIEN2k/eDMFT runtime is rendered into standalone PBS
+#   files for heavy numerical stages. You inspect and qsub those files yourself.
 
 [project]
 case = "01"
@@ -15,19 +22,25 @@ scratch_dir = "dft/tmp"
 dmft_scratch_dir = "dmft/tmp"
 
 [environment]
+# These paths locate native tools and are embedded into generated PBS scripts.
+# prepare-* does not export them into your current shell.
 wienroot = "/home/USER/apps/edmft/wien2k"
 edmft_root = "/home/USER/apps/edmft/eDMFT/bin"
 python = "/home/USER/miniforge3/envs/edmft/bin/python"
 python_bin_dir = "/home/USER/miniforge3/envs/edmft/bin"
+
+# Heavy-job runtime settings. These are used when standalone PBS scripts are
+# generated (and only by retained legacy foreground numerical runners).
 intel_root = "/opt/intel2019/compilers_and_libraries_2019.4.243"
 intel_arch = "intel64"
 fftw_lib = "/opt/fftw-3.3.10/lib"
 ulimit_stack = "unlimited"
 ulimit_core = "unlimited"
 
+# Extra variables for the full heavy-job runtime only. OMP_NUM_THREADS and
+# MKL_NUM_THREADS default to 1 in generated PBS scripts, so they need not be
+# repeated here unless you intentionally want another value.
 [environment_extra]
-OMP_NUM_THREADS = "1"
-MKL_NUM_THREADS = "1"
 I_MPI_HYDRA_BOOTSTRAP = "ssh"
 I_MPI_FABRICS = "shm"
 
