@@ -12,8 +12,8 @@
 # - prepare-* never modifies your login shell and does not source Intel/MKL.
 # - lightweight eDMFT helpers are called through the absolute configured Python
 #   and eDMFT script paths with only minimal child-process variables.
-# - the full Intel/MKL/MPI/WIEN2k/eDMFT runtime is rendered into standalone PBS
-#   files for heavy numerical stages. You inspect and qsub those files yourself.
+# - heavy numerical stages run only inside standalone PBS scripts that you
+#   inspect and qsub manually.
 
 [project]
 case = "01"
@@ -22,44 +22,31 @@ scratch_dir = "dft/tmp"
 dmft_scratch_dir = "dmft/tmp"
 
 [environment]
-# These paths locate native tools and are embedded into generated PBS scripts.
-# prepare-* does not export them into your current shell.
 wienroot = "/home/USER/apps/edmft/wien2k"
 edmft_root = "/home/USER/apps/edmft/eDMFT/bin"
 python = "/home/USER/miniforge3/envs/edmft/bin/python"
 python_bin_dir = "/home/USER/miniforge3/envs/edmft/bin"
-
-# Heavy-job runtime settings. These are used when standalone PBS scripts are
-# generated (and only by retained legacy foreground numerical runners).
 intel_root = "/opt/intel2019/compilers_and_libraries_2019.4.243"
 intel_arch = "intel64"
 fftw_lib = "/opt/fftw-3.3.10/lib"
 ulimit_stack = "unlimited"
 ulimit_core = "unlimited"
 
-# Extra variables for the full heavy-job runtime only. OMP_NUM_THREADS and
-# MKL_NUM_THREADS default to 1 in generated PBS scripts, so they need not be
-# repeated here unless you intentionally want another value.
 [environment_extra]
 I_MPI_HYDRA_BOOTSTRAP = "ssh"
 I_MPI_FABRICS = "shm"
 
 [parallel]
-# MPI used by native WIEN2k/eDMFT numerical stages (run_dmft.py/x_dmft.py).
+# Native WIEN2k/eDMFT MPI stack.
 mpi_launcher = "/opt/intel2019/compilers_and_libraries_2019.4.243/linux/mpi/intel64/bin/mpirun"
 mpi_np_flag = "-np"
-# Post-processing x_dmft.py installations commonly use mpi_prefix.dat2 for LAPW1.
-# Keep this explicit so generated PBS files are easy to inspect.
 write_mpi_prefix2 = true
 wien_machines_mode = "single_node_compact"
 dmft_wien_machines = false
 
 [dft]
-# This string is resolved into the generated standalone DFT PBS script.
 run_command = "/home/USER/apps/edmft/wien2k/run_lapw -p -cc 0.0001 -ec 0.0001 -i 100"
 
-# Preferred: provide PROJECT/inputs/params.dat.
-# Fallback only: if that file is absent, these sections can generate params.dat.
 [dmft_params]
 solver = "CTQMC"
 DCs = "nominal"
@@ -67,7 +54,7 @@ max_dmft_iterations = 1
 max_lda_iterations = 100
 
 [impurity0]
-# Fill only if you are NOT supplying inputs/params.dat.
+# Prefer PROJECT/inputs/params.dat. Fill these only for generated fallback.
 # exe = "ctqmc"
 # U = 8.0
 # J = 0.8
@@ -85,46 +72,32 @@ outer_drift = 0.005
 block_postprocess = true
 
 [post]
-# Which impurity self-energy suffix to continue, e.g. sig.inp.*.1
 impurity = 1
-# Average the last N selected Matsubara self-energies with official saverage.py.
 average_last = 3
 
-# maxent_params.dat is intentionally NOT hidden in config.toml.
-# Preferred: PROJECT/inputs/maxent_params.dat.
-# If absent, prepare-maxent writes the current upstream maxent_run.py template
-# into dmft/maxent/maxent_params.dat for explicit inspection/editing.
-# prepare-maxent writes the averaged self-energy as dmft/maxent/Sig.average.
-
 [maxent]
-# The validated cluster baseline runs:
-#   python $WIEN_DMFT_ROOT/maxent_run.py Sig.average > sig1.out 2>&1
-# after activating the configured conda environment.
-# mpi_prefix.dat is also written for consistency with the eDMFT work directory,
-# but maxent_run.py does not read it. The validated baseline therefore reports
-# mpi4py rank=0 size=1. Keep this serial baseline until a matching mpi4py/MPI
-# launcher is separately validated.
+# MaxEnt is Python/mpi4py and therefore has its OWN MPI runtime.
+# Do not reuse parallel.mpi_launcher unless mpi4py was built against Intel MPI.
+# By default the workflow uses ENV/bin/mpirun next to environment.python,
+# which is appropriate when mpi4py in that conda environment was built with
+# Open MPI. Override explicitly if needed:
+# mpi_launcher = "/home/USER/miniforge3/envs/edmft/bin/mpirun"
+mpi_np_flag = "-np"
+# prepare-maxent writes dmft/maxent/Sig.average and maxent_params.dat.
+# Useful MPI ranks cannot exceed the number of active MaxEnt baths/channels.
 
 [dos]
-# prepare-dos copies the Matsubara indmfl, preserves a backup, then changes
-# its second-line Matsubara flag 1 -> 0 and sets this real-frequency mesh.
 nomega = 200
 wmin = -3.0
 wmax = 1.0
 
 [band]
-# prepare-band independently starts from the converged dmft/ snapshot,
-# changes the copied indmfl flag 1 -> 0, and sets this real-frequency mesh.
 nomega = 200
 wmin = -6.0
 wmax = 6.0
-# Preferred path input: PROJECT/inputs/CASE.klist_band.
-# Fallback example only:
 klist_source = "@wien:fcc.klist"
 
 [analysis]
-# Low-frequency Matsubara points used for the diagnostic linear fit of ImSigma
-# when reporting Z and 1/Z. Always inspect the fit/R^2 before physical use.
 z_fit_points = 4
 
 [plot]
@@ -135,10 +108,6 @@ dos_xmax = 1.0
 akw_intensity = 0.97
 drop_klabels = ["LAMBDA", "DELTA", "Z"]
 
-# PBS settings are used only when GENERATING standalone scripts.
-# Preparation and PBS generation are intentionally separate:
-#   prepare-maxent -> inspect/edit -> pbs maxent -> inspect -> qsub manually
-# The generated jobs do not read config.toml and do not call workflow.py.
 [pbs]
 queue = "batch"
 nodes = 1
@@ -159,8 +128,8 @@ mem = ""
 
 [pbs_maxent]
 job_name = "MaxEnt"
-# The validated direct-Python MaxEnt baseline is serial.
-ppn = 1
+# Choose no more ranks than active baths/channels. MnO example with nb=2: ppn=2.
+ppn = 2
 walltime = "04:00:00"
 mem = ""
 
