@@ -13,8 +13,11 @@ def make_cfg(tmp_path: Path) -> WorkflowConfig:
         "environment": {
             "wienroot": "/opt/wien2k",
             "edmft_root": "/opt/edmft",
-            "python": "/opt/python/bin/python",
-            "python_bin_dir": "/opt/python/bin",
+            "python": "/opt/miniforge3/envs/edmft/bin/python",
+            "python_bin_dir": "/opt/miniforge3/envs/edmft/bin",
+            "intel_root": "/opt/intel2019",
+            "intel_arch": "intel64",
+            "fftw_lib": "/opt/fftw/lib",
         },
         "parallel": {"mpi_launcher": "/opt/intel/bin/mpirun", "write_mpi_prefix2": True},
         "pbs": {"queue": "batch", "nodes": 1, "ppn": 4, "walltime": "01:00:00"},
@@ -35,7 +38,7 @@ def test_upstream_maxent_template_is_explicit_python():
 def test_prepare_helper_uses_absolute_python_and_minimal_environment(tmp_path):
     cfg = make_cfg(tmp_path)
     cmd = edmft_helper_command(cfg, "saverage.py")
-    assert cmd == ["/opt/python/bin/python", "/opt/edmft/saverage.py"]
+    assert cmd == ["/opt/miniforge3/envs/edmft/bin/python", "/opt/edmft/saverage.py"]
 
     scratch = tmp_path / "scratch"
     env = build_helper_env(cfg, scratch=scratch)
@@ -105,29 +108,19 @@ def test_post_pbs_is_standalone_and_uses_native_commands(tmp_path):
         assert "-m edmft_workflow" not in script
         assert "config.toml" not in script
 
-    # MaxEnt must not inherit the Intel MPI launcher used by native eDMFT.
-    assert "/opt/edmft/maxent_run.py" in maxent
-    assert "sig.inpx" in maxent
-    assert "MaxEnt launch mode: direct Python" in maxent
-    assert "/opt/intel/bin/mpirun" not in maxent.split("MaxEnt launch mode:", 1)[1]
+    # MaxEnt mirrors the user's validated cluster script: activate the same
+    # conda env, write mpi_prefix.dat for bookkeeping, but launch maxent_run.py
+    # directly with Python. That produces mpi4py rank=0 size=1 and avoids
+    # mixing Intel mpirun with an Open-MPI-built mpi4py.
+    assert "source /opt/miniforge3/etc/profile.d/conda.sh" in maxent
+    assert "conda activate edmft" in maxent
+    assert 'echo "/opt/intel/bin/mpirun -np $NP" > mpi_prefix.dat' in maxent
+    assert "python /opt/edmft/maxent_run.py Sig.average > sig1.out 2>&1" in maxent
+    assert "$MPI -np" not in maxent
+    assert "Sig.average" in maxent
 
     assert "/opt/wien2k/x_lapw" in dos
     assert "/opt/edmft/x_dmft.py lapw1" in dos
     assert "/opt/edmft/x_dmft.py dmft1" in dos
     assert "/opt/edmft/x_dmft.py lapw1 --band" in band
     assert "/opt/edmft/x_dmft.py dmftp" in band
-
-
-def test_maxent_parallel_requires_its_own_explicit_launcher(tmp_path):
-    cfg = make_cfg(tmp_path)
-    (cfg.dmft_dir / "maxent").mkdir(parents=True, exist_ok=True)
-    cfg.data["maxent"] = {
-        "mpi_launcher": "/opt/openmpi/bin/mpirun",
-        "mpi_np_flag": "-np",
-    }
-
-    text = render_pbs(cfg, "maxent")
-    native = text.split("MaxEnt launch mode:", 1)[1]
-    assert "explicit mpi4py-compatible MPI" in native
-    assert "/opt/openmpi/bin/mpirun" in native
-    assert "/opt/intel/bin/mpirun" not in native
