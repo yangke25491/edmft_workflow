@@ -7,7 +7,7 @@ import numpy as np
 
 from .checks import convergence_report, format_convergence
 from .provenance import write_stage_manifest
-from .utils import WorkflowError, require_file, safe_prepare_dir, run_stage
+from .utils import WorkflowError, require_file, safe_prepare_dir, run_edmft_helper
 
 
 OFFICIAL_MAXENT_PARAMS = """params={'statistics': 'fermi', # fermi/bose
@@ -65,23 +65,13 @@ def validate_same_grid(files: list[Path]) -> None:
             raise WorkflowError(f"Matsubara grids differ: {files[0]} vs {path}")
 
 
-def _edmft_command(cfg, name: str) -> str:
-    configured = cfg.get(f"commands.{name.replace('.py', '').replace('-', '_')}")
-    if configured:
-        return str(configured)
-    root = cfg.get("environment.edmft_root")
-    if not root:
-        raise WorkflowError(f"environment.edmft_root is required to locate {name}")
-    return str(Path(str(root)) / name)
-
-
 def prepare_maxent(cfg, force: bool = False) -> Path:
     """Prepare official MaxEnt inputs without running the expensive continuation.
 
-    Transparent sequence:
-      selected sig.inp.*.<impurity> -> official saverage.py -> sig.inpx
-      inputs/maxent_params.dat (preferred) or upstream template -> maxent_params.dat
-      static run_maxent.pbs is generated separately by the PBS layer.
+    The only upstream executable used during preparation is saverage.py. It is
+    launched through the configured Python and absolute eDMFT script path with
+    minimal child-only environment; Intel/MKL/MPI setup is reserved for the
+    later standalone run_maxent.pbs job.
     """
     report = convergence_report(
         cfg.dmft_dir,
@@ -110,19 +100,15 @@ def prepare_maxent(cfg, force: bool = False) -> Path:
     selected = out / "selected_sigmas.txt"
     selected.write_text("\n".join(p.name for p in local_files) + "\n", encoding="utf-8")
 
-    # Haule tutorial/helper convention: average selected Matsubara self-energies
-    # into sig.inpx, retaining s_oo/Edc comments.
-    savg = _edmft_command(cfg, "saverage.py")
-    run_stage(
+    run_edmft_helper(
         cfg,
-        [savg, *[p.name for p in local_files], "-o", "sig.inpx"],
+        "saverage.py",
+        [*[p.name for p in local_files], "-o", "sig.inpx"],
         cwd=out,
         log=out / "saverage.log",
     )
     siginpx = require_file(out / "sig.inpx")
 
-    # Scientific MaxEnt parameters remain a native eDMFT input. Prefer an
-    # explicit project input file and never hide/overwrite it through TOML.
     inputs = cfg.root_dir / "inputs"
     supplied = inputs / "maxent_params.dat"
     target = out / "maxent_params.dat"
@@ -150,5 +136,5 @@ def prepare_maxent(cfg, force: bool = False) -> Path:
     print(f"MaxEnt parameter file          : {target}")
     print(f"Parameter source               : {origin}")
     print(f"Provenance manifest            : {manifest}")
-    print("Inspect sig.inpx and maxent_params.dat before qsub.")
+    print("Inspect sig.inpx and maxent_params.dat before generating the PBS job.")
     return out
