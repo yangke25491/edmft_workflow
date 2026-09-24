@@ -10,10 +10,9 @@
 #
 # Environment policy:
 # - prepare-* never modifies your login shell and does not source Intel/MKL.
-# - lightweight eDMFT helpers are called through the absolute configured Python
-#   and eDMFT script paths with only minimal child-process variables.
-# - heavy numerical stages run only inside standalone PBS scripts that you
-#   inspect and qsub manually.
+# - lightweight eDMFT helpers are called through absolute configured paths.
+# - DFT, DMFT, and MaxEnt use standalone PBS scripts.
+# - DOS and band are run in foreground MPI child shells; the parent shell is unchanged.
 
 [project]
 case = "01"
@@ -37,7 +36,7 @@ I_MPI_HYDRA_BOOTSTRAP = "ssh"
 I_MPI_FABRICS = "shm"
 
 [parallel]
-# Native WIEN2k/eDMFT MPI stack.
+# Native WIEN2k/eDMFT MPI stack used by DMFT and foreground DOS/band.
 mpi_launcher = "/opt/intel2019/compilers_and_libraries_2019.4.243/linux/mpi/intel64/bin/mpirun"
 mpi_np_flag = "-np"
 write_mpi_prefix2 = true
@@ -76,15 +75,13 @@ impurity = 1
 average_last = 3
 
 [maxent]
-# MaxEnt is Python/mpi4py and therefore has its OWN MPI runtime.
-# Do not reuse parallel.mpi_launcher unless mpi4py was built against Intel MPI.
-# By default the workflow uses ENV/bin/mpirun next to environment.python,
-# which is appropriate when mpi4py in that conda environment was built with
-# Open MPI. Override explicitly if needed:
+# MaxEnt uses mpi4py from the configured conda environment. The validated
+# cluster launch uses ENV/bin/mpirun (Open MPI here), not Intel mpirun.
+# Override only if needed:
 # mpi_launcher = "/home/USER/miniforge3/envs/edmft/bin/mpirun"
 mpi_np_flag = "-np"
-# prepare-maxent writes dmft/maxent/Sig.average and maxent_params.dat.
-# Useful MPI ranks cannot exceed the number of active MaxEnt baths/channels.
+# prepare-maxent writes dmft/maxent/sig.inpx and maxent_params.dat.
+# MPI scaling is limited by the number of active MaxEnt baths/channels.
 
 [dos]
 nomega = 200
@@ -97,6 +94,12 @@ wmin = -6.0
 wmax = 6.0
 klist_source = "@wien:fcc.klist"
 
+# DOS and band are foreground MPI postprocessing. These values are used to
+# write mpi_prefix.dat inside the prepared onreal/ and band/ directories.
+[foreground]
+dos_np = 8
+band_np = 8
+
 [analysis]
 z_fit_points = 4
 
@@ -108,6 +111,7 @@ dos_xmax = 1.0
 akw_intensity = 0.97
 drop_klabels = ["LAMBDA", "DELTA", "Z"]
 
+# PBS is reserved for the heavy stages: DFT, DMFT, MaxEnt.
 [pbs]
 queue = "batch"
 nodes = 1
@@ -128,19 +132,7 @@ mem = ""
 
 [pbs_maxent]
 job_name = "MaxEnt"
-# Choose no more ranks than active baths/channels. MnO example with nb=2: ppn=2.
+# Example for nb=2: use two Open MPI ranks.
 ppn = 2
-walltime = "04:00:00"
-mem = ""
-
-[pbs_dos]
-job_name = "DOS"
-ppn = 20
-walltime = "04:00:00"
-mem = ""
-
-[pbs_band]
-job_name = "BAND"
-ppn = 33
-walltime = "04:00:00"
+walltime = "168:00:00"
 mem = ""
