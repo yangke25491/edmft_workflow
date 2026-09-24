@@ -31,13 +31,6 @@ def _stage_dir(cfg, stage: str) -> Path:
 
 
 def _mpi_launcher(cfg) -> str:
-    """MPI launcher used by WIEN2k/eDMFT numerical stages.
-
-    This is intentionally NOT reused for MaxEnt. The Python interpreter used by
-    maxent_run.py may have mpi4py built against a different MPI implementation
-    (for example Open MPI while the eDMFT binaries use Intel MPI). MaxEnt has a
-    separate explicit launcher setting below.
-    """
     configured = cfg.get("parallel.mpi_launcher")
     if configured:
         return str(configured)
@@ -47,88 +40,54 @@ def _mpi_launcher(cfg) -> str:
     return "mpirun"
 
 
-def _maxent_mpi_launcher(cfg) -> str | None:
-    """Return an explicitly configured launcher for mpi4py MaxEnt, if any.
-
-    Upstream to_real_axis.py invokes ``maxent_run.py sig.inpx`` directly. That
-    is the safe default here as well. Parallel MaxEnt is opt-in because the MPI
-    launcher must match the MPI vendor against which mpi4py was built.
-    """
-    configured = cfg.get("maxent.mpi_launcher")
-    if configured is None:
-        return None
-    text = str(configured).strip()
-    return text or None
+def _python_env_root(cfg) -> Path:
+    python = Path(str(cfg.require("environment.python"))).expanduser()
+    if python.parent.name != "bin":
+        raise WorkflowError(
+            "environment.python must point to .../envs/NAME/bin/python so the MaxEnt PBS can activate the same conda environment"
+        )
+    return python.parent.parent
 
 
 def _maxent_preamble(cfg, cwd: Path, scratch: Path) -> str:
-    """Render a Python/MaxEnt runtime without injecting Intel MPI.
+    """Render the validated MaxEnt runtime used on the target cluster.
 
-    MaxEnt is a Python/mpi4py stage. The user's mpi4py can be built against Open
-    MPI even when WIEN2k/eDMFT binaries use Intel MPI. Therefore this preamble
-    deliberately omits Intel MPI bin/lib paths and I_MPI_* variables. It keeps
-    the compiler/MKL runtime libraries that compiled MaxEnt extensions may need,
-    plus the configured Python environment library directory.
+    Important: ``maxent_run.py`` is launched directly with Python. We still
+    write ``mpi_prefix.dat`` for consistency with the eDMFT working directory,
+    but upstream maxent_run.py does not consume that file. Direct Python launch
+    therefore runs with mpi4py COMM_WORLD size=1 unless the command itself is
+    launched through a compatible MPI implementation.
     """
-    lines = ["set -e", f"cd {shlex.quote(str(cwd))}"]
+    intel = Path(str(cfg.require("environment.intel_root"))).expanduser()
+    env_root = _python_env_root(cfg)
+    env_name = env_root.name
+    wienroot = str(cfg.require("environment.wienroot"))
+    edmft_root = str(cfg.require("environment.edmft_root"))
+    fftw = str(cfg.get("environment.fftw_lib", "/opt/fftw-3.3.10/lib"))
+    arch = str(cfg.get("environment.intel_arch", "intel64"))
+    conda_sh = env_root.parent.parent / "etc/profile.d/conda.sh"
 
-    wienroot = cfg.get("environment.wienroot")
-    edmft_root = cfg.get("environment.edmft_root")
-    pybin = cfg.get("environment.python_bin_dir")
-    python = cfg.get("environment.python")
-    intel_root = cfg.get("environment.intel_root")
-    fftw_lib = cfg.get("environment.fftw_lib")
-
-    if wienroot:
-        lines.append(f"export WIENROOT={shlex.quote(str(wienroot))}")
-    if edmft_root:
-        lines.append(f"export WIEN_DMFT_ROOT={shlex.quote(str(edmft_root))}")
-
-    path_parts = [x for x in (edmft_root, wienroot, pybin, "/usr/bin", "/bin") if x]
-    if path_parts:
-        lines.append("export PATH=" + shlex.quote(":".join(str(x) for x in path_parts)))
-
-    ld_parts: list[str] = []
-    if intel_root:
-        intel = Path(str(intel_root)).expanduser()
-        ld_parts += [
-            str(intel / "linux/mkl/lib/intel64"),
-            str(intel / "linux/compiler/lib/intel64_lin"),
-        ]
-    if fftw_lib:
-        ld_parts.append(str(fftw_lib))
-    if python:
-        p = Path(str(python)).expanduser()
-        if p.parent.name == "bin":
-            ld_parts.append(str(p.parent.parent / "lib"))
-    if ld_parts:
-        lines.append(
-            "export LD_LIBRARY_PATH="
-            + shlex.quote(":".join(ld_parts))
-            + ":${LD_LIBRARY_PATH:-}"
-        )
-
-    if edmft_root:
-        lines.append(
-            f"export PYTHONPATH={shlex.quote(str(edmft_root))}${{PYTHONPATH:+:${{PYTHONPATH}}}}"
-        )
-
-    stack = cfg.get("environment.ulimit_stack", "unlimited")
-    core = cfg.get("environment.ulimit_core", "unlimited")
-    if stack:
-        lines.append(f"ulimit -s {shlex.quote(str(stack))}")
-    if core:
-        lines.append(f"ulimit -c {shlex.quote(str(core))}")
-
-    lines.append(f"mkdir -p {shlex.quote(str(scratch))}")
-    lines.append(f"export SCRATCH={shlex.quote(str(scratch))}")
-
-    extra = cfg.section("environment_extra")
-    lines.append(f"export OMP_NUM_THREADS={shlex.quote(str(extra.get('OMP_NUM_THREADS', '1')))}")
-    lines.append(f"export MKL_NUM_THREADS={shlex.quote(str(extra.get('MKL_NUM_THREADS', '1')))}")
-    for key, value in cfg.section("maxent_environment_extra").items():
-        lines.append(f"export {key}={shlex.quote(str(value))}")
-
+    lines = [
+        "set -e",
+        f"cd {shlex.quote(str(cwd))}",
+        f"INTEL={shlex.quote(str(intel))}",
+        f"ENV={shlex.quote(str(env_root))}",
+        f"source \"$INTEL/linux/bin/compilervars.sh\" {shlex.quote(arch)}",
+        f"source {shlex.quote(str(conda_sh))}",
+        f"conda activate {shlex.quote(env_name)}",
+        f"export WIENROOT={shlex.quote(wienroot)}",
+        f"export WIEN_DMFT_ROOT={shlex.quote(edmft_root)}",
+        'export PYTHONPATH="$WIEN_DMFT_ROOT${PYTHONPATH:+:$PYTHONPATH}"',
+        'export LD_LIBRARY_PATH="$INTEL/linux/mkl/lib/intel64:$INTEL/linux/compiler/lib/intel64_lin:$INTEL/linux/mpi/intel64/lib/release:$INTEL/linux/mpi/intel64/lib:'
+        + shlex.quote(fftw)
+        + ':$ENV/lib:${LD_LIBRARY_PATH:-}"',
+        "export I_MPI_HYDRA_BOOTSTRAP=ssh",
+        "export I_MPI_FABRICS=shm",
+        "export OMP_NUM_THREADS=1",
+        "export MKL_NUM_THREADS=1",
+        f"export SCRATCH={shlex.quote(str(scratch))}",
+        'mkdir -p "$SCRATCH"',
+    ]
     return "\n".join(lines)
 
 
@@ -181,27 +140,15 @@ def _native_commands(cfg, stage: str) -> list[str]:
         ]
 
     if stage == "maxent":
-        maxent = shlex.quote(str(Path(edmft_root) / "maxent_run.py"))
-        py = shlex.quote(python)
-        launcher = _maxent_mpi_launcher(cfg)
-        if launcher is None:
-            # Match upstream to_real_axis.py: invoke maxent_run.py directly.
-            # Remove stale MPI bootstrap variables so mpi4py starts as a clean
-            # singleton communicator instead of interpreting another MPI stack.
-            return [
-                'echo "MaxEnt launch mode: direct Python (upstream-compatible; no external mpirun)"',
-                "unset PMI_SIZE PMI_RANK PMI_FD PMIX_RANK OMPI_COMM_WORLD_SIZE OMPI_COMM_WORLD_RANK || true",
-                f"{py} {maxent} sig.inpx > maxent.out 2>&1",
-                "test -s Sig.out",
-            ]
-
-        npflag = str(cfg.get("maxent.mpi_np_flag", "-np"))
+        launcher = _mpi_launcher(cfg)
+        npflag = str(cfg.get("parallel.mpi_np_flag", "-np"))
         return [
             'NP=$(wc -l < "$PBS_NODEFILE")',
-            f"MAXENT_MPI={shlex.quote(launcher)}",
-            'echo "MaxEnt launch mode: explicit mpi4py-compatible MPI"',
-            'echo "MaxEnt MPI launcher=$MAXENT_MPI"',
-            f"$MAXENT_MPI {shlex.quote(npflag)} \"$NP\" {py} {maxent} sig.inpx > maxent.out 2>&1",
+            f"echo \"{shlex.quote(launcher)} {npflag} $NP\" > mpi_prefix.dat",
+            'echo "mpi_prefix.dat:"',
+            "cat mpi_prefix.dat",
+            'echo "MaxEnt launch mode: direct Python (validated cluster workflow; mpi4py size=1)"',
+            f"python {shlex.quote(str(Path(edmft_root) / 'maxent_run.py'))} Sig.average > sig1.out 2>&1",
             "test -s Sig.out",
         ]
 
@@ -226,12 +173,7 @@ def _native_commands(cfg, stage: str) -> list[str]:
 
 
 def render_pbs(cfg, stage: str) -> str:
-    """Render a self-contained PBS script.
-
-    The generated job has no workflow runtime dependency and contains only the
-    resolved environment plus native WIEN2k/eDMFT commands, so it can be
-    inspected and submitted manually.
-    """
+    """Render a self-contained PBS script with visible native commands."""
     r = _stage_resources(cfg, stage)
     name = str(r.get("job_name", f"{cfg.case}_{stage}"))
     nodes = int(r.get("nodes", 1))
@@ -260,18 +202,14 @@ def render_pbs(cfg, stage: str) -> str:
         "# It contains no workflow runtime dependency or project-config lookup.",
         "# Inspect it, then submit manually with: qsub <this-file>",
     ]
-    if stage == "maxent" and _maxent_mpi_launcher(cfg) is None and ppn != 1:
+    if stage == "maxent" and ppn != 1:
         lines += [
-            "# NOTE: MaxEnt is in upstream-compatible direct-Python mode.",
-            f"# pbs_maxent.ppn={ppn} requests multiple slots but only one process is launched.",
-            "# Set pbs_maxent.ppn=1, or explicitly configure maxent.mpi_launcher",
-            "# to an MPI implementation that matches this Python's mpi4py build.",
+            "# NOTE: this validated MaxEnt launch is direct Python and therefore uses mpi4py size=1.",
+            f"# pbs_maxent.ppn={ppn} reserves multiple slots but does not parallelize maxent_run.py.",
+            "# Keep this while validating the workflow; parallel MaxEnt requires a launcher matching mpi4py's MPI vendor.",
         ]
 
-    if stage == "maxent":
-        preamble = _maxent_preamble(cfg, cwd, scratch)
-    else:
-        preamble = shell_preamble(cfg, cwd, scratch=scratch)
+    preamble = _maxent_preamble(cfg, cwd, scratch) if stage == "maxent" else shell_preamble(cfg, cwd, scratch=scratch)
 
     lines += [
         "",
