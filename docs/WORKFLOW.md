@@ -8,7 +8,6 @@ PROJECT/
 ├── dft/
 │   └── tmp/                 # ordinary WIEN2k SCRATCH
 └── dmft/
-    ├── DFT_SOURCE -> ../dft # provenance only; never used as numerical working files
     ├── tmp/
     ├── maxent/
     ├── onreal/
@@ -81,16 +80,30 @@ python /path/to/edmft_workflow/workflow.py -c PROJECT/config.toml prepare-dmft
 
 The stage does the following in order:
 
-1. verifies that converged DFT and `case.indmf/indmfl/indmfi` exist in `dft/`;
-2. prepares a clean `dmft/` snapshot (an existing non-empty one requires `--force` and is backed up);
-3. runs `dmft_copy.py PROJECT/dft` **from inside `PROJECT/dmft`**;
-4. explicitly copies DFT state omitted by upstream `dmft_copy.py`, especially `case.vsp/case.vns` and spin-polarized variants when present;
-5. explicitly copies the original `case.indmf` for provenance;
-6. creates `dmft/DFT_SOURCE -> ../dft` as a provenance-only symlink;
+1. validates the converged DFT state **before touching an existing `dmft/` directory**;
+2. verifies that manual `init_dmft.py` has produced `case.indmf`, `case.indmfl`, and `case.indmfi` in `dft/`;
+3. verifies the required WIEN2k inputs and a complete potential state (`vsp+vns`, or the complete spin-polarized potential set);
+4. prepares a clean `dmft/` snapshot; an existing non-empty one is refused unless `--force` is used, in which case it is first moved to a timestamped backup;
+5. runs `dmft_copy.py PROJECT/dft` **from inside `PROJECT/dmft`**;
+6. explicitly copies state omitted by upstream `dmft_copy.py`, especially the original `case.indmf` and the converged `case.vsp/case.vns` or spin-polarized variants;
 7. generates `params.dat` from `[dmft_params]` and `[impurityN]` sections of `config.toml`;
-8. generates the initial `sig.inp` with the official `szero.py` unless configured to keep an existing self-energy.
+8. generates the initial `sig.inp` with the official `szero.py` unless configured otherwise;
+9. creates `dmft/tmp/` for the production PBS scratch convention;
+10. runs a final READY validation and returns success only when the prepared snapshot is complete.
+
+There is deliberately **no `DFT_SOURCE` symlink**. The fixed sibling layout already records the relationship between `dft/` and `dmft/`, while avoiding a misleading runtime dependency on the DFT baseline.
 
 The numerical DFT state is copied rather than symlinked because charge-self-consistent DMFT updates WIEN2k potentials and charge-density state. A writable symlink back into `dft/` could silently modify the pristine DFT baseline.
+
+The workflow also deliberately does **not** clone the whole DFT directory. Large eigenvector/eigenvalue scratch products such as `case.vector*` and `case.energy*` are not copied merely for archival completeness; the snapshot contains the state required to launch the independent CSC-DMFT calculation.
+
+A successful command ends with:
+
+```text
+DMFT snapshot READY
+```
+
+Only after this gate passes should `submit dmft` be used.
 
 ## `params.dat` mapping
 
@@ -150,7 +163,9 @@ After inspecting the prepared snapshot:
 python /path/to/edmft_workflow/workflow.py -c PROJECT/config.toml submit dmft
 ```
 
-`run_dmft.py` is always executed in `PROJECT/dmft`, never in `dft/`. This preserves the converged DFT directory as an immutable baseline for comparison or restarting a new DMFT model.
+`run_dmft.py` is always executed in `PROJECT/dmft`, never in `dft/`. Before launching it, the workflow reuses the same READY snapshot validation so a partially modified `dmft/` directory cannot silently enter production.
+
+This preserves the converged DFT directory as an independent baseline for comparison or restarting a new DMFT model.
 
 ## Scratch convention
 
