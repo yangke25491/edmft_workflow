@@ -16,8 +16,7 @@ PROJECT/
     ├── maxent/
     ├── onreal/
     ├── band/
-    ├── analysis/
-    └── results/
+    └── analysis/
 ```
 
 The workflow has exactly **two mandatory manual scientific checkpoints**, both performed in the complete WIEN2k DFT directory:
@@ -25,7 +24,7 @@ The workflow has exactly **two mandatory manual scientific checkpoints**, both p
 1. `init_lapw` in `PROJECT/dft` before the DFT run.
 2. `init_dmft.py` in the same `PROJECT/dft` after DFT convergence.
 
-The workflow manager never calls `qsub`.
+The workflow manager never calls `qsub` and never modifies the user's persistent shell environment.
 
 ## Operating model
 
@@ -43,7 +42,26 @@ inspect PBS
 manual qsub
 ```
 
-The generated PBS contains resolved WIEN2k/eDMFT commands and environment setup. It does **not** import `edmft_workflow` and does **not** read `config.toml` at runtime.
+The generated PBS contains resolved WIEN2k/eDMFT commands and the complete heavy runtime setup. It does **not** import `edmft_workflow` and does **not** read `config.toml` at runtime.
+
+## Environment isolation contract
+
+Preparation and calculation are intentionally separated:
+
+```text
+prepare-* / doctor / check / status / analyze
+    → lightweight foreground operations
+    → no Intel compilervars
+    → no MKL/MPI setup
+    → no PATH/LD_LIBRARY_PATH/PYTHONPATH rewrite
+
+pbs STAGE
+    → writes full Intel/MKL/MPI/WIEN2k/eDMFT setup into run_STAGE.pbs
+    → user inspects it
+    → user qsub's it manually
+```
+
+When a preparation step needs an official Python helper (`dmft_copy.py`, `szero.py`, `saverage.py`), it runs the configured Python executable and absolute eDMFT script path directly. Only minimal child-process variables are supplied. They disappear when that child process exits and do not affect the login shell.
 
 ## Stage 0: create layout
 
@@ -113,12 +131,14 @@ The stage:
 
 1. validates DFT and manual `init_dmft.py` outputs before touching `dmft/`;
 2. backs up an existing non-empty `dmft/` when `--force` is explicitly used;
-3. runs `dmft_copy.py PROJECT/dft` from inside `PROJECT/dmft`;
+3. invokes official `dmft_copy.py PROJECT/dft` from inside `PROJECT/dmft` using the lightweight helper policy;
 4. supplements state omitted by upstream `dmft_copy.py`, including `CASE.indmf` and converged potential files;
 5. prefers `PROJECT/inputs/params.dat`; otherwise generates a fallback from config;
-6. runs official `szero.py` for the initial `sig.inp` unless configured otherwise;
+6. invokes official `szero.py` for the initial `sig.inp` unless configured otherwise;
 7. creates `dmft/tmp/`;
 8. performs a final READY gate.
+
+`prepare-dmft` does not source Intel `compilervars.sh` and does not construct the heavy MKL/MPI runtime. That environment appears only later in `run_dmft.pbs`.
 
 There is deliberately no `DFT_SOURCE` symlink and no full recursive DFT copy. Large transient `vector*`/`energy*` files are not duplicated just for archival completeness.
 
@@ -161,6 +181,8 @@ sig.inpx
 maxent_params.dat
 ```
 
+`saverage.py` is invoked as a lightweight child helper. The heavy MaxEnt calculation is not run during preparation.
+
 `PROJECT/inputs/maxent_params.dat` is preferred. If absent, the current upstream `maxent_run.py` default template is written explicitly to `dmft/maxent/maxent_params.dat`.
 
 Inspect/edit:
@@ -201,7 +223,7 @@ After `Sig.out` exists:
 python /path/to/edmft_workflow/workflow.py -c PROJECT/config.toml prepare-dos
 ```
 
-Preparation starts from the converged Matsubara `dmft/` snapshot, creates `onreal/`, copies `Sig.out -> sig.inp`, preserves `CASE.indmfl.matsubara`, and changes only the copied real-axis file:
+Preparation starts from the converged Matsubara `dmft/` snapshot. It invokes `dmft_copy.py` with the lightweight helper policy, creates `onreal/`, copies `Sig.out -> sig.inp`, preserves `CASE.indmfl.matsubara`, and changes only the copied real-axis file:
 
 ```text
 CASE.indmfl second line:
@@ -324,6 +346,10 @@ When DOS and band outputs exist, the analysis command also invokes the existing 
 ## Safety invariants
 
 - no workflow command calls `qsub`;
+- no workflow command mutates the user's login shell or persistent shell configuration;
+- `prepare-*` does not source Intel/MKL or rewrite PATH/LD_LIBRARY_PATH/PYTHONPATH;
+- lightweight official helpers run with explicit Python/script paths and minimal child-only variables;
+- full Intel/MKL/MPI runtime is confined to generated heavy-job PBS scripts (apart from explicitly invoked legacy foreground numerical runners);
 - production PBS scripts are standalone and do not read `config.toml` at runtime;
 - `dft/` is not modified by DMFT preparation;
 - `dmft/` is not modified by MaxEnt/DOS/band preparation;
