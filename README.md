@@ -164,24 +164,25 @@ Prepare only:
 python ~/apps/edmft_workflow/workflow.py -c config.toml prepare-maxent
 ```
 
-The preparation follows the upstream logic:
+The validated preparation is deliberately explicit:
 
 ```text
 last N sig.inp.*.<impurity>
         ↓
 official saverage.py
         ↓
-sig.inpx
+Sig.average
         +
 maxent_params.dat
 ```
 
-`saverage.py` is a lightweight prepare helper; MaxEnt itself is not run during preparation.
+The `Sig.average` name is intentional. Upstream examples use both `sig.inpx` and an explicit `-o Sig.average`; this workflow follows the cluster procedure that has already been validated locally.
 
-Inspect and validate before freezing a PBS script:
+Inspect before freezing a PBS script:
 
 ```bash
 cat dmft/maxent/selected_sigmas.txt
+head dmft/maxent/Sig.average
 cat dmft/maxent/maxent_params.dat
 python ~/apps/edmft_workflow/workflow.py -c config.toml doctor maxent
 ```
@@ -191,16 +192,34 @@ After any desired edit of `maxent_params.dat`:
 ```bash
 python ~/apps/edmft_workflow/workflow.py -c config.toml pbs maxent
 cat dmft/maxent/run_maxent.pbs
+```
+
+The generated MaxEnt PBS mirrors the validated cluster script:
+
+```text
+source Intel compilervars
+activate the configured conda environment
+set WIENROOT / WIEN_DMFT_ROOT / MKL / MPI runtime libraries
+write mpi_prefix.dat
+python $WIEN_DMFT_ROOT/maxent_run.py Sig.average > sig1.out 2>&1
+```
+
+Then submit manually:
+
+```bash
 qsub dmft/maxent/run_maxent.pbs
 ```
 
-The PBS script directly runs upstream:
+**Important:** `maxent_run.py` does not read `mpi_prefix.dat`. The validated direct-Python launch therefore reports `Running in parallel mode rank=0 size=1`; it is a serial MaxEnt baseline. The file is retained because it matches the proven eDMFT job environment, not because it parallelizes MaxEnt. Do not wrap this Python command with Intel `mpirun` unless the exact Python environment's `mpi4py` has first been verified to use Intel MPI. A Python environment whose `mpi4py` was built with Open MPI will warn or fail if forced through Intel MPI.
 
-```text
-maxent_run.py sig.inpx
+For this validated baseline use:
+
+```toml
+[pbs_maxent]
+ppn = 1
 ```
 
-It does not call `workflow.py` and does not read `config.toml` at runtime. Its required output is `Sig.out`.
+The required continuation output is `dmft/maxent/Sig.out`.
 
 ## Real-axis DOS
 
