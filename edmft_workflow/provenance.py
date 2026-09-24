@@ -103,8 +103,17 @@ def refresh_stage_manifest(stage_dir: Path, extra_prepared: Iterable[Path] | Non
     return manifest
 
 
-def verify_stage_manifest(stage_dir: Path) -> tuple[bool, str]:
-    """Verify that current files still match the most recently refreshed manifest."""
+def verify_stage_manifest(stage_dir: Path, strict: bool | None = None) -> tuple[bool, str]:
+    """Verify files against the manifest.
+
+    Before a standalone PBS exists, user edits are intentionally allowed: this
+    is the review window between `prepare-*` and `pbs STAGE`. In that state a
+    hash mismatch is reported as informational but does not fail `doctor`.
+
+    Once any `run_*.pbs` exists, the stage is considered frozen and manifest
+    mismatches fail. `strict=True` can be used by tests/tools to force exact
+    verification even before PBS generation.
+    """
     manifest = stage_dir / "manifest.json"
     if not manifest.exists():
         return False, f"missing {manifest}"
@@ -112,6 +121,9 @@ def verify_stage_manifest(stage_dir: Path) -> tuple[bool, str]:
         data = json.loads(manifest.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as exc:
         return False, f"unreadable manifest: {exc}"
+
+    if strict is None:
+        strict = any(stage_dir.glob("run_*.pbs"))
 
     mismatches: list[str] = []
     records = list(data.get("sources", {}).values()) + list(data.get("prepared", []))
@@ -125,7 +137,13 @@ def verify_stage_manifest(stage_dir: Path) -> tuple[bool, str]:
             continue
         if sha256_file(path) != rec.get("sha256"):
             mismatches.append(f"sha256:{path.name}")
+
     if mismatches:
-        return False, ", ".join(mismatches)
+        detail = ", ".join(mismatches)
+        if strict:
+            return False, detail
+        return True, f"modified during review (allowed before PBS freeze): {detail}"
+
     stamp = data.get("refreshed_utc") or data.get("created_utc") or "unknown"
-    return True, f"matches manifest snapshot {stamp}"
+    state = "frozen" if strict else "prepared/unfrozen"
+    return True, f"{state}; matches manifest snapshot {stamp}"
