@@ -37,20 +37,28 @@ def _build_parser() -> argparse.ArgumentParser:
     for stage in ("maxent", "dos", "band"):
         sp = sub.add_parser(
             f"prepare-{stage}",
-            help=f"Prepare {stage} inputs and write a standalone run_{stage}.pbs; does not qsub",
+            help=f"Prepare {stage} native inputs only; inspect them before generating PBS",
         )
         sp.add_argument("--force", action="store_true")
 
     sub.add_parser("doctor-env", help="Compatibility alias: check runtime environment")
     doc = sub.add_parser("doctor", help="Check a prepared calculation stage")
-    doc.add_argument("stage", nargs="?", choices=["dmft", "maxent", "dos", "band", "env"], default="dmft")
+    doc.add_argument(
+        "stage",
+        nargs="?",
+        choices=["dft", "dmft", "maxent", "dos", "band", "env"],
+        default="dmft",
+    )
 
     chk = sub.add_parser("check", help="Check scientific convergence/results")
     chk.add_argument("stage", nargs="?", choices=["dmft"], default="dmft")
 
     sub.add_parser("status", help="Show which workflow stages are prepared/completed")
 
-    prep = sub.add_parser("pbs", help="Write a standalone PBS script; inspect it and qsub manually")
+    prep = sub.add_parser(
+        "pbs",
+        help="Freeze current prepared inputs into a standalone PBS script; inspect it and qsub manually",
+    )
     prep.add_argument("stage", choices=["dft", "dmft", "maxent", "dos", "band"])
     prep.add_argument("--force", action="store_true")
 
@@ -73,38 +81,40 @@ def _print_checks(rows) -> bool:
 def _status(cfg) -> None:
     case = cfg.case
     stages = [
-        ("DFT", cfg.dft_dir / f"{case}.scf"),
-        ("DMFT", cfg.dmft_dir / "info.iterate"),
-        ("MaxEnt prepared", cfg.dmft_dir / "maxent" / "run_maxent.pbs"),
-        ("MaxEnt complete", cfg.dmft_dir / "maxent" / "Sig.out"),
-        ("DOS prepared", cfg.dmft_dir / "onreal" / "run_dos.pbs"),
-        ("DOS complete", cfg.dmft_dir / "onreal" / f"{case}.cdos"),
-        ("Band prepared", cfg.dmft_dir / "band" / "run_band.pbs"),
-        ("Band complete", cfg.dmft_dir / "band" / "eigvals.dat"),
+        ("DFT result", cfg.dft_dir / f"{case}.scf"),
+        ("DFT init_dmft", cfg.dft_dir / f"{case}.indmfi"),
+        ("DFT PBS", cfg.dft_dir / "run_dft.pbs"),
+        ("DMFT result", cfg.dmft_dir / "info.iterate"),
+        ("DMFT PBS", cfg.dmft_dir / "run_dmft.pbs"),
+        ("MaxEnt inputs", cfg.dmft_dir / "maxent" / "manifest.json"),
+        ("MaxEnt PBS", cfg.dmft_dir / "maxent" / "run_maxent.pbs"),
+        ("MaxEnt result", cfg.dmft_dir / "maxent" / "Sig.out"),
+        ("DOS inputs", cfg.dmft_dir / "onreal" / "manifest.json"),
+        ("DOS PBS", cfg.dmft_dir / "onreal" / "run_dos.pbs"),
+        ("DOS result", cfg.dmft_dir / "onreal" / f"{case}.cdos"),
+        ("Band inputs", cfg.dmft_dir / "band" / "manifest.json"),
+        ("Band PBS", cfg.dmft_dir / "band" / "run_band.pbs"),
+        ("Band result", cfg.dmft_dir / "band" / "eigvals.dat"),
         ("Analysis", cfg.dmft_dir / "analysis" / "summary.md"),
     ]
     for label, path in stages:
-        if path.is_dir():
-            ok = path.exists() and any(path.iterdir())
-        else:
-            ok = path.exists() and path.stat().st_size > 0 if path.exists() else False
+        ok = path.exists() and path.is_file() and path.stat().st_size > 0
         print(f"{'DONE' if ok else '--':4s}  {label:18s}  {path}")
 
 
-def _prepare_with_pbs(cfg, stage: str, force: bool) -> None:
+def _prepare_stage(cfg, stage: str, force: bool) -> None:
     if stage == "maxent":
-        prepare_maxent(cfg, force=force)
+        out = prepare_maxent(cfg, force=force)
     elif stage == "dos":
-        prepare_dos(cfg, force=force)
+        out = prepare_dos(cfg, force=force)
     elif stage == "band":
-        prepare_band(cfg, force=force)
+        out = prepare_band(cfg, force=force)
     else:  # pragma: no cover
         raise WorkflowError(f"Unsupported prepare stage: {stage}")
-    # The freshly prepared stage directory has no PBS script, so no overwrite is needed.
-    path = write_pbs(cfg, stage, force=False)
-    print(f"Prepared {stage}. Review inputs and PBS before submitting:")
-    print(f"  cat {path}")
-    print(f"  qsub {path}")
+    print(f"Prepared native {stage} inputs: {out}")
+    print(f"Next check: python workflow.py -c {cfg.source} doctor {stage}")
+    print(f"After inspection/editing, freeze PBS: python workflow.py -c {cfg.source} pbs {stage}")
+    print("Then inspect the generated run_*.pbs and submit it yourself with qsub.")
 
 
 def _analyze(cfg) -> None:
@@ -129,7 +139,7 @@ def main(argv=None) -> int:
 
         if args.command in {"prepare-maxent", "prepare-dos", "prepare-band"}:
             stage = args.command.removeprefix("prepare-")
-            _prepare_with_pbs(cfg, stage, args.force)
+            _prepare_stage(cfg, stage, args.force)
             return 0
 
         if args.command == "doctor-env":
