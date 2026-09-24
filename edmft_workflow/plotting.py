@@ -92,7 +92,7 @@ def plot_self_energy(cfg) -> list[Path]:
     created: list[Path] = []
     labels = cfg.get("plot.orbital_labels", [])
     for source, name, xlabel in [
-        (cfg.work_root / "maxent" / "Sig.average", "sigma_matsubara", r"$\omega_n$ (eV)"),
+        (cfg.work_root / "maxent" / "sig.inpx", "sigma_matsubara", r"$\omega_n$ (eV)"),
         (cfg.work_root / "maxent" / "Sig.out", "sigma_realaxis", r"$\omega$ (eV)"),
     ]:
         if not source.exists():
