@@ -6,20 +6,13 @@ import shutil
 
 from .provenance import write_stage_manifest
 from .utils import (
-    WorkflowError, copy_case_files, patch_indmfl, require_file,
-    run_stage, safe_prepare_dir,
+    WorkflowError,
+    copy_case_files,
+    patch_indmfl,
+    require_file,
+    run_edmft_helper,
+    safe_prepare_dir,
 )
-
-
-def _edmft_command(cfg, name: str) -> str:
-    key = name.replace(".py", "").replace("-", "_")
-    configured = cfg.get(f"commands.{key}")
-    if configured:
-        return str(configured)
-    root = cfg.get("environment.edmft_root")
-    if not root:
-        raise WorkflowError(f"environment.edmft_root is required to locate {name}")
-    return str(Path(str(root)) / name)
 
 
 def _copy_wien_potentials(cfg, out: Path) -> list[Path]:
@@ -27,13 +20,20 @@ def _copy_wien_potentials(cfg, out: Path) -> list[Path]:
     case = cfg.case
     copy_case_files(cfg.dmft_dir, out, case, ["vsp", "vns"], required=False)
     copy_case_files(
-        cfg.dmft_dir, out, case,
-        ["vspup", "vspdn", "vnsup", "vnsdn", "vrespsum"], required=False,
+        cfg.dmft_dir,
+        out,
+        case,
+        ["vspup", "vspdn", "vnsup", "vnsdn", "vrespsum"],
+        required=False,
     )
-    base_ok = all((out / f"{case}.{s}").is_file() and (out / f"{case}.{s}").stat().st_size > 0
-                  for s in ("vsp", "vns"))
-    spin_ok = all((out / f"{case}.{s}").is_file() and (out / f"{case}.{s}").stat().st_size > 0
-                  for s in ("vspup", "vspdn", "vnsup", "vnsdn"))
+    base_ok = all(
+        (out / f"{case}.{s}").is_file() and (out / f"{case}.{s}").stat().st_size > 0
+        for s in ("vsp", "vns")
+    )
+    spin_ok = all(
+        (out / f"{case}.{s}").is_file() and (out / f"{case}.{s}").stat().st_size > 0
+        for s in ("vspup", "vspdn", "vnsup", "vnsdn")
+    )
     if not (base_ok or spin_ok):
         raise WorkflowError(
             "Real-axis directory needs converged potential files: case.vsp+case.vns "
@@ -84,7 +84,12 @@ def _prepare_real_axis_indmfl(path: Path, nomega: int, wmin: float, wmax: float)
 
 
 def prepare_dos(cfg, force: bool = False) -> Path:
-    """Prepare a standalone real-axis DOS directory; do not run numerical jobs."""
+    """Prepare a standalone real-axis DOS directory; do not run numerical jobs.
+
+    dmft_copy.py is the only upstream helper invoked here and runs with the
+    lightweight prepare-helper policy. The Intel/MKL/MPI runtime is introduced
+    later only in the generated standalone DOS PBS script.
+    """
     case = cfg.case
     source = cfg.dmft_dir
     source_indmfl = require_file(source / f"{case}.indmfl")
@@ -92,13 +97,17 @@ def prepare_dos(cfg, force: bool = False) -> Path:
     sig = require_file(source / "maxent" / "Sig.out")
 
     out = safe_prepare_dir(source / "onreal", force=force)
-    dmft_copy = _edmft_command(cfg, "dmft_copy.py")
 
     # Official semantics: dmft_copy.py SOURCE copies SOURCE into cwd.
-    run_stage(cfg, [dmft_copy, str(source)], cwd=out, log=out / "dmft_copy.log")
+    run_edmft_helper(
+        cfg,
+        "dmft_copy.py",
+        [str(source)],
+        cwd=out,
+        log=out / "dmft_copy.log",
+    )
     potentials = _copy_wien_potentials(cfg, out)
 
-    # The continued real-axis self-energy is named sig.inp for dmft1/dmftp.
     sig_target = out / "sig.inp"
     shutil.copy2(sig, sig_target)
 
