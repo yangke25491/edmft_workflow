@@ -169,6 +169,12 @@ def _manifest_check(root: Path) -> tuple[str, bool, str]:
     return "manifest snapshot", ok, detail
 
 
+def _optional_pbs(checks: list[tuple[str, bool, str]], path: Path) -> None:
+    """Validate a PBS script if it has already been frozen, but do not require it during prepare review."""
+    if path.exists():
+        checks.append(_file_check(path.name, path))
+
+
 def doctor_dft(cfg) -> list[tuple[str, bool, str]]:
     root = cfg.dft_dir
     case = cfg.case
@@ -186,6 +192,7 @@ def doctor_dft(cfg) -> list[tuple[str, bool, str]]:
     indmfl = root / f"{case}.indmfl"
     if indmfl.exists():
         checks.append(("case.indmfl flag", _indmfl_flag(indmfl) == 1, f"found={_indmfl_flag(indmfl)} expected=1"))
+    _optional_pbs(checks, root / "run_dft.pbs")
     return checks
 
 
@@ -204,6 +211,7 @@ def doctor_dmft(cfg) -> list[tuple[str, bool, str]]:
     checks.append(("sig.inp.*.*", bool(sigs), f"{len(sigs)} files"))
     impurities = sorted(p for p in dmft.glob("imp.*") if p.is_dir())
     checks.append(("imp.*/", bool(impurities), f"{len(impurities)} directories"))
+    _optional_pbs(checks, dmft / "run_dmft.pbs")
     return checks
 
 
@@ -213,9 +221,9 @@ def doctor_maxent(cfg) -> list[tuple[str, bool, str]]:
         _file_check("selected_sigmas.txt", root / "selected_sigmas.txt"),
         _sigma_table_check("sig.inpx", root / "sig.inpx"),
         _file_check("maxent_params.dat", root / "maxent_params.dat"),
-        _file_check("run_maxent.pbs", root / "run_maxent.pbs"),
         _manifest_check(root),
     ]
+    _optional_pbs(checks, root / "run_maxent.pbs")
     sigout = root / "Sig.out"
     if sigout.exists():
         checks.append(_sigma_table_check("Sig.out", sigout))
@@ -242,9 +250,9 @@ def doctor_dos(cfg) -> list[tuple[str, bool, str]]:
         _file_check("case.indmfl.matsubara", backup),
         ("backup flag", _indmfl_flag(backup) == 1, f"found={_indmfl_flag(backup)} expected=1"),
         _file_check("indmfl.diff", root / "indmfl.diff"),
-        _file_check("run_dos.pbs", root / "run_dos.pbs"),
         _manifest_check(root),
     ]
+    _optional_pbs(checks, root / "run_dos.pbs")
     if (root / f"{case}.cdos").exists():
         marker_ok, marker_detail = _dmft1_end(root, case)
         checks.append(("DMFT1 END", marker_ok, marker_detail))
@@ -267,9 +275,9 @@ def doctor_band(cfg) -> list[tuple[str, bool, str]]:
         _file_check("case.indmfl.matsubara", backup),
         ("backup flag", _indmfl_flag(backup) == 1, f"found={_indmfl_flag(backup)} expected=1"),
         _file_check("indmfl.diff", root / "indmfl.diff"),
-        _file_check("run_band.pbs", root / "run_band.pbs"),
         _manifest_check(root),
     ]
+    _optional_pbs(checks, root / "run_band.pbs")
     if klist.exists() and klist.stat().st_size > 0:
         try:
             checks.append(("k-point count", True, str(count_klist_points(klist))))
