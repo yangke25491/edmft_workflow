@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
-import os
 import re
 import shlex
-import shutil
 
 from .parallel import write_edmft_mpi_prefix, write_wien_machines
 from .utils import (
@@ -70,7 +68,7 @@ def render_params_dat(cfg) -> str:
 
     Top-level `[dmft_params]` keys become ordinary Python assignments, while
     `[impurity0]`, `[impurity1]`, ... become `iparams0`, `iparams1`, ...
-    dictionaries.  eDMFT impurity parameters use the conventional
+    dictionaries. eDMFT impurity parameters use the conventional
     `[value, comment]` representation; generated comments are intentionally
     empty because the authoritative values live in config.toml.
     """
@@ -108,12 +106,62 @@ def render_params_dat(cfg) -> str:
     return "\n".join(lines)
 
 
+def _nonempty(path: Path) -> bool:
+    return path.is_file() and path.stat().st_size > 0
+
+
+def _require_any_case_file(directory: Path, case: str, suffixes: tuple[str, ...], label: str) -> Path:
+    for suffix in suffixes:
+        path = directory / f"{case}.{suffix}"
+        if _nonempty(path):
+            return path
+    names = ", ".join(f"{case}.{s}" for s in suffixes)
+    raise WorkflowError(f"Missing {label} in {directory}. Need one of: {names}")
+
+
+def _validate_potential_set(directory: Path, case: str) -> str:
+    """Require a complete nonmagnetic or spin-polarized WIEN2k potential set."""
+    base = ("vsp", "vns")
+    spin = ("vspup", "vspdn", "vnsup", "vnsdn")
+    if all(_nonempty(directory / f"{case}.{s}") for s in base):
+        return "nonmagnetic"
+    if all(_nonempty(directory / f"{case}.{s}") for s in spin):
+        return "spin-polarized"
+    raise WorkflowError(
+        f"Incomplete WIEN2k potential state in {directory}. Need either "
+        f"{case}.vsp + {case}.vns, or the complete "
+        f"{case}.vspup/{case}.vspdn/{case}.vnsup/{case}.vnsdn set."
+    )
+
+
+def _validate_dft_ready(cfg) -> None:
+    """Verify converged DFT + manual init_dmft.py before touching dmft/."""
+    case = cfg.case
+    required = (
+        "struct",
+        "in0",
+        "inm",
+        "klist",
+        "clmsum",
+        "scf",
+        "indmf",
+        "indmfl",
+        "indmfi",
+    )
+    for suffix in required:
+        require_file(cfg.dft_dir / f"{case}.{suffix}")
+
+    _require_any_case_file(cfg.dft_dir, case, ("in1", "in1c"), "WIEN2k LAPW1 input")
+    _require_any_case_file(cfg.dft_dir, case, ("in2", "in2c"), "WIEN2k LAPW2 input")
+    _validate_potential_set(cfg.dft_dir, case)
+
+
 def _prepare_clean_dmft_dir(cfg, force: bool) -> None:
     """Prepare dmft/ as an isolated snapshot directory.
 
-    Older `init-layout` versions created an empty dmft/tmp.  Ignore/remove that
+    Older `init-layout` versions created an empty dmft/tmp. Ignore/remove that
     empty housekeeping directory so a first prepare-dmft does not falsely look
-    like an existing calculation.  Any real payload requires --force, which
+    like an existing calculation. Any real payload requires --force, which
     backs up the whole previous dmft/ directory before recreating it.
     """
     dmft = cfg.dmft_dir
@@ -135,8 +183,8 @@ def _copy_dft_state_extras(cfg) -> None:
     source = cfg.dft_dir
     target = cfg.dmft_dir
 
-    # Keep the human-readable DMFT model definition for provenance.  Upstream
-    # dmft_copy.py copies indmfl/indmfi but not the original case.indmf.
+    # Preserve the original correlated-space definition. Upstream dmft_copy.py
+    # copies indmfl/indmfi but not the human-readable case.indmf.
     copy_case_files(source, target, case, ["indmf"], required=True)
 
     # Current upstream dmft_copy.py does not copy converged potential files.
@@ -144,26 +192,6 @@ def _copy_dft_state_extras(cfg) -> None:
     # than symlinking them back to the DFT baseline.
     suffixes = ["vsp", "vns", "vspup", "vspdn", "vnsup", "vnsdn", "vrespsum"]
     copy_case_files(source, target, case, suffixes, required=False)
-
-    base_ok = all((source / f"{case}.{s}").is_file() and (source / f"{case}.{s}").stat().st_size > 0
-                  for s in ("vsp", "vns"))
-    spin_ok = all((source / f"{case}.{s}").is_file() and (source / f"{case}.{s}").stat().st_size > 0
-                  for s in ("vspup", "vspdn", "vnsup", "vnsdn"))
-    if not (base_ok or spin_ok):
-        raise WorkflowError(
-            "Converged DFT potential files are incomplete. Need case.vsp+case.vns "
-            "or a complete spin-polarized vspup/vspdn/vnsup/vnsdn set."
-        )
-
-
-def _write_dft_source_link(cfg) -> Path:
-    """Create a provenance-only symlink; numerical files never run through it."""
-    link = cfg.dmft_dir / "DFT_SOURCE"
-    if link.exists() or link.is_symlink():
-        link.unlink()
-    target = os.path.relpath(cfg.dft_dir, cfg.dmft_dir)
-    link.symlink_to(target, target_is_directory=True)
-    return link
 
 
 def _prepare_initial_sigma(cfg) -> Path:
@@ -189,6 +217,32 @@ def _prepare_initial_sigma(cfg) -> Path:
     return require_file(sig)
 
 
+def _validate_dmft_snapshot(cfg) -> None:
+    """Final READY gate before prepare-dmft returns success."""
+    case = cfg.case
+    required_case = (
+        "struct",
+        "in0",
+        "inm",
+        "klist",
+        "clmsum",
+        "indmf",
+        "indmfl",
+        "indmfi",
+    )
+    for suffix in required_case:
+        require_file(cfg.dmft_dir / f"{case}.{suffix}")
+
+    _require_any_case_file(cfg.dmft_dir, case, ("in1", "in1c"), "WIEN2k LAPW1 input")
+    _require_any_case_file(cfg.dmft_dir, case, ("in2", "in2c"), "WIEN2k LAPW2 input")
+    _validate_potential_set(cfg.dmft_dir, case)
+
+    require_file(cfg.dmft_dir / "params.dat")
+    require_file(cfg.dmft_dir / "sig.inp")
+    if not cfg.dmft_scratch_dir.is_dir():
+        raise WorkflowError(f"DMFT scratch directory was not created: {cfg.dmft_scratch_dir}")
+
+
 def prepare_dmft(cfg, force: bool = False) -> Path:
     """Create an isolated DMFT working snapshot after manual init_dmft.py in dft/.
 
@@ -197,26 +251,24 @@ def prepare_dmft(cfg, force: bool = False) -> Path:
       2. user runs init_dmft.py manually in that SAME dft/ directory
       3. prepare-dmft copies the initialized state into a separate dmft/
       4. workflow generates params.dat and initial sig.inp in dmft/
+      5. final READY validation must pass before the command returns success
 
     `dmft_copy.py SOURCE` copies FROM SOURCE INTO THE CURRENT DIRECTORY, hence
     it is executed with cwd=dmft/ and dft/ as its positional source argument.
+    The dmft/ snapshot contains real copies of mutable WIEN2k state; it never
+    symlinks numerical input/output files back to the DFT baseline.
     """
     case = cfg.case
 
-    # Validate everything that should exist BEFORE touching an older dmft/ run.
-    for name in [
-        f"{case}.struct",
-        f"{case}.scf",
-        f"{case}.indmf",
-        f"{case}.indmfl",
-        f"{case}.indmfi",
-    ]:
-        require_file(cfg.dft_dir / name)
+    # Validate DFT + init_dmft.py completely BEFORE touching an older dmft/ run.
+    _validate_dft_ready(cfg)
     params_text = render_params_dat(cfg)
 
+    # Protect an existing DMFT run. --force creates a timestamped backup first.
     _prepare_clean_dmft_dir(cfg, force=force)
     cfg.dmft_scratch_dir.mkdir(parents=True, exist_ok=True)
 
+    # Haule convention: dmft_copy.py SOURCE copies into the CURRENT directory.
     dmft_copy = str(cfg.get("commands.dmft_copy", "dmft_copy.py"))
     run_stage(
         cfg,
@@ -226,33 +278,30 @@ def prepare_dmft(cfg, force: bool = False) -> Path:
         log=cfg.dmft_dir / "dmft_copy_from_dft.log",
     )
 
-    require_file(cfg.dmft_dir / f"{case}.struct")
-    require_file(cfg.dmft_dir / f"{case}.indmfl")
-    require_file(cfg.dmft_dir / f"{case}.indmfi")
+    # Supplement files intentionally omitted by upstream dmft_copy.py.
     _copy_dft_state_extras(cfg)
-    source_link = _write_dft_source_link(cfg)
 
+    # Generate run-specific DMFT inputs only after the DFT snapshot exists.
     params = cfg.dmft_dir / "params.dat"
     params.write_text(params_text, encoding="utf-8")
     require_file(params)
     sig = _prepare_initial_sigma(cfg)
 
+    # Do not report success merely because copy/szero exited zero.
+    _validate_dmft_snapshot(cfg)
+
     print(f"DMFT working snapshot prepared: {cfg.dmft_dir}")
-    print(f"DFT provenance link          : {source_link} -> {os.readlink(source_link)}")
     print(f"Generated params.dat         : {params}")
     print(f"Initial self-energy          : {sig}")
-    print("No further initialization is required. Next: inspect the snapshot, then submit dmft.")
+    print("DMFT snapshot READY")
+    print("Next: inspect params.dat and sig.inp, then submit dmft.")
     return cfg.dmft_dir
 
 
 def run_dmft(cfg) -> Path:
     """Run Haule's charge-self-consistent DFT+DMFT in the isolated dmft/ snapshot."""
     case = cfg.case
-    require_file(cfg.dmft_dir / f"{case}.struct")
-    require_file(cfg.dmft_dir / f"{case}.indmfl")
-    require_file(cfg.dmft_dir / f"{case}.indmfi")
-    require_file(cfg.dmft_dir / "params.dat")
-    require_file(cfg.dmft_dir / "sig.inp")
+    _validate_dmft_snapshot(cfg)
     klist = require_file(cfg.dmft_dir / f"{case}.klist")
     cfg.dmft_scratch_dir.mkdir(parents=True, exist_ok=True)
 
