@@ -65,13 +65,18 @@ def validate_same_grid(files: list[Path]) -> None:
             raise WorkflowError(f"Matsubara grids differ: {files[0]} vs {path}")
 
 
-def prepare_maxent(cfg, force: bool = False) -> Path:
-    """Prepare official MaxEnt inputs without running the expensive continuation.
+def active_maxent_baths(path: Path) -> int:
+    """Count nonzero complex self-energy channels exactly as maxent_run.py does."""
+    data = np.loadtxt(path, comments="#").T
+    nonzero_columns = 0
+    for row in data[1:]:
+        if np.sum(np.abs(row)) > 0:
+            nonzero_columns += 1
+    return nonzero_columns // 2
 
-    The selected Matsubara self-energies are averaged with upstream saverage.py
-    into ``Sig.average``. This filename is explicit and mirrors the validated
-    manual workflow. The later PBS job runs ``maxent_run.py Sig.average``.
-    """
+
+def prepare_maxent(cfg, force: bool = False) -> Path:
+    """Prepare official MaxEnt inputs without running the expensive continuation."""
     report = convergence_report(
         cfg.dmft_dir,
         max_dn=float(cfg.get("convergence.max_dn", 5e-3)),
@@ -107,6 +112,7 @@ def prepare_maxent(cfg, force: bool = False) -> Path:
         log=out / "saverage.log",
     )
     sig_average = require_file(out / "Sig.average")
+    nb = active_maxent_baths(sig_average)
 
     inputs = cfg.root_dir / "inputs"
     supplied = inputs / "maxent_params.dat"
@@ -132,6 +138,8 @@ def prepare_maxent(cfg, force: bool = False) -> Path:
     for p in local_files:
         print(f"  {p.name}")
     print(f"Averaged Matsubara self-energy : {sig_average}")
+    print(f"Active MaxEnt baths/channels   : {nb}")
+    print(f"Useful MaxEnt MPI ranks        : <= {max(1, nb)}")
     print(f"MaxEnt parameter file          : {target}")
     print(f"Parameter source               : {origin}")
     print(f"Provenance manifest            : {manifest}")
