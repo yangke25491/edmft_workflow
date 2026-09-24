@@ -10,260 +10,145 @@ PROJECT/
 │   ├── maxent_params.dat
 │   └── CASE.klist_band
 ├── dft/
-│   └── tmp/
 └── dmft/
-    ├── tmp/
     ├── maxent/
     ├── onreal/
     ├── band/
     └── analysis/
 ```
 
-The workflow has exactly **two mandatory manual scientific checkpoints**, both performed in the complete WIEN2k DFT directory:
+The two scientific initializers remain manual:
 
 1. `init_lapw` in `PROJECT/dft` before the DFT run.
-2. `init_dmft.py` in the same `PROJECT/dft` after DFT convergence.
+2. `init_dmft.py` in `PROJECT/dft` after DFT convergence.
 
-The workflow manager never calls `qsub` and never modifies the user's persistent shell environment.
+The workflow never calls `qsub` and never modifies persistent shell configuration.
 
-## Operating model
-
-Every production stage follows the same transparent pattern:
+## Execution classes
 
 ```text
-prepare native files
-       ↓
-doctor / inspect / edit
-       ↓
-freeze standalone PBS
-       ↓
-inspect PBS
-       ↓
-manual qsub
+PBS heavy jobs
+  dft
+  dmft
+  maxent
+
+Foreground MPI
+  dos
+  band
+
+Lightweight foreground
+  prepare-*
+  doctor / check / status
+  analyze / plots
 ```
 
-The generated PBS contains resolved WIEN2k/eDMFT commands and the complete heavy runtime setup. It does **not** import `edmft_workflow` and does **not** read `config.toml` at runtime.
+Preparation helpers use explicit paths and a minimal child-only environment. Numerical jobs/runs create their full runtime only inside the PBS script or disposable foreground child shell.
 
-## Environment isolation contract
-
-Preparation and calculation are intentionally separated:
-
-```text
-prepare-* / doctor / check / status / analyze
-    → lightweight foreground operations
-    → no Intel compilervars
-    → no MKL/MPI setup
-    → no PATH/LD_LIBRARY_PATH/PYTHONPATH rewrite
-
-pbs STAGE
-    → writes full Intel/MKL/MPI/WIEN2k/eDMFT setup into run_STAGE.pbs
-    → user inspects it
-    → user qsub's it manually
-```
-
-When a preparation step needs an official Python helper (`dmft_copy.py`, `szero.py`, `saverage.py`), it runs the configured Python executable and absolute eDMFT script path directly. Only minimal child-process variables are supplied. They disappear when that child process exits and do not affect the login shell.
-
-## Stage 0: create layout
+## DFT
 
 ```bash
-python /path/to/edmft_workflow/workflow.py -c config.toml init-layout
-```
-
-This creates `inputs/`, `dft/`, `dmft/`, and DFT scratch directories. It does not run either initializer.
-
-## Stage 1: manual WIEN2k initialization
-
-```bash
-cd PROJECT/dft
-export SCRATCH="$PWD/tmp"
-mkdir -p "$SCRATCH"
+python workflow.py -c config.toml init-layout
+cd dft
 init_lapw
 ```
 
-`init_lapw` stays manual because choices such as RMT reduction, XC potential, spin polarization, and k mesh are scientific decisions.
-
-## Stage 2: DFT
-
-Generate a standalone DFT PBS script:
+Then:
 
 ```bash
-python /path/to/edmft_workflow/workflow.py -c PROJECT/config.toml pbs dft
-cat PROJECT/dft/run_dft.pbs
-qsub PROJECT/dft/run_dft.pbs
+python workflow.py -c config.toml pbs dft
+cat dft/run_dft.pbs
+qsub dft/run_dft.pbs
 ```
-
-The user performs the `qsub` manually.
-
-## Stage 3: manual DMFT initialization in converged DFT directory
 
 After DFT convergence:
 
 ```bash
-cd PROJECT/dft
+cd dft
 init_dmft.py
 ```
 
-Inspect:
-
-```text
-CASE.indmf
-CASE.indmfl
-CASE.indmfi
-```
-
-The initializer is intentionally run in the full converged DFT directory so it sees the actual WIEN2k state.
-
-A useful validation is:
+## DMFT
 
 ```bash
-python /path/to/edmft_workflow/workflow.py -c PROJECT/config.toml doctor dft
+python workflow.py -c config.toml prepare-dmft
+python workflow.py -c config.toml doctor dmft
+python workflow.py -c config.toml pbs dmft
+cat dmft/run_dmft.pbs
+qsub dmft/run_dmft.pbs
 ```
 
-The Matsubara `CASE.indmfl` flag is expected to be `1`.
+The DMFT PBS writes `mpi_prefix.dat` from `$PBS_NODEFILE` and uses the native Intel MPI runtime.
 
-## Stage 4: isolated DMFT snapshot
+## MaxEnt
 
 ```bash
-python /path/to/edmft_workflow/workflow.py -c PROJECT/config.toml prepare-dmft
+python workflow.py -c config.toml prepare-maxent
 ```
 
-The stage:
-
-1. validates DFT and manual `init_dmft.py` outputs before touching `dmft/`;
-2. backs up an existing non-empty `dmft/` when `--force` is explicitly used;
-3. invokes official `dmft_copy.py PROJECT/dft` from inside `PROJECT/dmft` using the lightweight helper policy;
-4. supplements state omitted by upstream `dmft_copy.py`, including `CASE.indmf` and converged potential files;
-5. prefers `PROJECT/inputs/params.dat`; otherwise generates a fallback from config;
-6. invokes official `szero.py` for the initial `sig.inp` unless configured otherwise;
-7. creates `dmft/tmp/`;
-8. performs a final READY gate.
-
-`prepare-dmft` does not source Intel `compilervars.sh` and does not construct the heavy MKL/MPI runtime. That environment appears only later in `run_dmft.pbs`.
-
-There is deliberately no `DFT_SOURCE` symlink and no full recursive DFT copy. Large transient `vector*`/`energy*` files are not duplicated just for archival completeness.
-
-After inspection:
-
-```bash
-python /path/to/edmft_workflow/workflow.py -c PROJECT/config.toml pbs dmft
-cat PROJECT/dmft/run_dmft.pbs
-qsub PROJECT/dmft/run_dmft.pbs
-```
-
-## Stage 5: check converged DMFT
-
-```bash
-python /path/to/edmft_workflow/workflow.py -c PROJECT/config.toml doctor dmft
-python /path/to/edmft_workflow/workflow.py -c PROJECT/config.toml check dmft
-```
-
-`doctor` checks files and stage assumptions. `check` reports parsed `info.iterate` quantities including `mu`, `Vdc`, `n_latt`, `n_imp`, occupancy mismatch, and outer-cycle drift.
-
-The converged baseline `PROJECT/dmft/CASE.indmfl` must remain on the Matsubara axis with flag `1`.
-
-## Stage 6: MaxEnt analytic continuation
-
-Prepare native inputs only:
-
-```bash
-python /path/to/edmft_workflow/workflow.py -c PROJECT/config.toml prepare-maxent
-```
-
-Sequence:
+Preparation performs:
 
 ```text
 last N sig.inp.*.<impurity>
         ↓
-official saverage.py
+saverage.py
         ↓
-Sig.average
+sig.inpx
         +
 maxent_params.dat
 ```
 
-`saverage.py` is invoked as a lightweight child helper. The heavy MaxEnt calculation is not run during preparation.
-
-`PROJECT/inputs/maxent_params.dat` is preferred. If absent, the current upstream `maxent_run.py` default template is written explicitly to `dmft/maxent/maxent_params.dat`.
-
-Inspect/edit:
+Inspect:
 
 ```bash
-cat dmft/maxent/selected_sigmas.txt
-head dmft/maxent/Sig.average
+head dmft/maxent/sig.inpx
 cat dmft/maxent/maxent_params.dat
-python /path/to/edmft_workflow/workflow.py -c PROJECT/config.toml doctor maxent
+python workflow.py -c config.toml doctor maxent
 ```
 
-Then freeze the PBS:
+Generate and submit:
 
 ```bash
-python /path/to/edmft_workflow/workflow.py -c PROJECT/config.toml pbs maxent
+python workflow.py -c config.toml pbs maxent
 cat dmft/maxent/run_maxent.pbs
-```
-
-The generated PBS mirrors the already validated cluster script. It activates the configured conda environment, loads the Intel/MKL runtime used on the cluster, writes `mpi_prefix.dat`, and runs:
-
-```text
-python $WIEN_DMFT_ROOT/maxent_run.py Sig.average > sig1.out 2>&1
-```
-
-Submit manually:
-
-```bash
 qsub dmft/maxent/run_maxent.pbs
 ```
 
-`mpi_prefix.dat` does **not** parallelize this step because upstream `maxent_run.py` does not read it. With the validated direct-Python launch, `mpi4py` reports `rank=0 size=1`. This serial baseline is deliberate because the configured Python environment can have `mpi4py` built against Open MPI while the native WIEN2k/eDMFT stack uses Intel MPI. Forcing that Python through Intel `mpirun` produces a mixed-MPI warning and is not part of the validated baseline.
+The validated MaxEnt launch uses the Open MPI runtime installed beside the configured Python environment, because that environment's `mpi4py` is Open-MPI based:
 
-Use one PBS slot for this baseline:
+```bash
+ENV=/home/USER/miniforge3/envs/edmft
+MPI="$ENV/bin/mpirun"
+NP=$(wc -l < "$PBS_NODEFILE")
 
-```toml
-[pbs_maxent]
-ppn = 1
+echo "$MPI -np $NP" > mpi_prefix.dat
+
+"$MPI" -np "$NP" \
+    "$ENV/bin/python" \
+    "$WIEN_DMFT_ROOT/maxent_run.py" \
+    sig.inpx > sig1.out 2>&1
 ```
+
+Do not replace this launcher with Intel `mpirun` unless `mpi4py` has been built against Intel MPI. The MaxEnt MPI scaling is limited by the number of active baths/channels; for `nb=2`, two MPI ranks are the useful bath-level limit.
 
 Required output:
 
 ```text
-Sig.out
+dmft/maxent/Sig.out
 ```
 
-MaxEnt does **not** modify `CASE.indmfl`.
-
-## Stage 7: real-axis DOS
+## Real-axis DOS: foreground MPI
 
 After `Sig.out` exists:
 
 ```bash
-python /path/to/edmft_workflow/workflow.py -c PROJECT/config.toml prepare-dos
+python workflow.py -c config.toml prepare-dos
+python workflow.py -c config.toml doctor dos
+python workflow.py -c config.toml run dos
 ```
 
-Preparation starts from the converged Matsubara `dmft/` snapshot. It invokes `dmft_copy.py` with the lightweight helper policy, creates `onreal/`, copies `Sig.out -> sig.inp`, preserves `CASE.indmfl.matsubara`, and changes only the copied real-axis file:
+`prepare-dos` creates `dmft/onreal/`, copies `Sig.out -> sig.inp`, preserves `CASE.indmfl.matsubara`, and changes only the copied `CASE.indmfl` from Matsubara flag `1` to real-axis flag `0`.
 
-```text
-CASE.indmfl second line:
-Matsubara flag 1 -> 0
-nomega          -> configured DOS mesh
-omega_min/max   -> configured real-axis window
-```
-
-The exact change is written to:
-
-```text
-onreal/indmfl.diff
-```
-
-Inspect and freeze:
-
-```bash
-cat dmft/onreal/indmfl.diff
-python /path/to/edmft_workflow/workflow.py -c PROJECT/config.toml doctor dos
-python /path/to/edmft_workflow/workflow.py -c PROJECT/config.toml pbs dos
-cat dmft/onreal/run_dos.pbs
-qsub dmft/onreal/run_dos.pbs
-```
-
-The standalone PBS contains the official numerical sequence:
+`run dos` starts a disposable child shell, loads the native Intel/MKL/MPI runtime, writes `mpi_prefix.dat` using `[foreground].dos_np`, and runs:
 
 ```text
 x_lapw -f CASE lapw0
@@ -271,105 +156,57 @@ x_dmft.py lapw1
 x_dmft.py dmft1
 ```
 
-The parent `dmft/CASE.indmfl` remains at flag `1`.
+The logs are shown live and saved in `dmft/onreal/`.
 
-## Stage 8: A(k,w) / band spectra
+## Band / A(k,w): foreground MPI
 
-Band preparation starts independently from the converged Matsubara `dmft/` snapshot, not from `onreal/`:
-
-```bash
-python /path/to/edmft_workflow/workflow.py -c PROJECT/config.toml prepare-band
-```
-
-The band path is taken in this priority order:
-
-```text
-PROJECT/inputs/CASE.klist_band
-        ↓ if absent
-band.klist_source from config
-        ↓ if absent
-STOP
-```
-
-The copied `band/CASE.indmfl` is preserved as `CASE.indmfl.matsubara` and converted `1 -> 0` with the configured band real-frequency mesh.
-
-Inspect and freeze:
+Prepare:
 
 ```bash
-cat dmft/band/indmfl.diff
-python /path/to/edmft_workflow/workflow.py -c PROJECT/config.toml doctor band
-python /path/to/edmft_workflow/workflow.py -c PROJECT/config.toml pbs band
-cat dmft/band/run_band.pbs
-qsub dmft/band/run_band.pbs
+python workflow.py -c config.toml prepare-band
+python workflow.py -c config.toml doctor band
+python workflow.py -c config.toml run band
 ```
 
-The standalone PBS directly runs:
+The band path is taken from `inputs/CASE.klist_band` when present, otherwise from the explicit `band.klist_source` configuration.
+
+`run band` writes `mpi_prefix.dat` using `[foreground].band_np` and runs:
 
 ```text
 x_dmft.py lapw1 --band
 x_dmft.py dmftp
 ```
 
-Band doctor checks the k-list point count and, once outputs exist, compares it with `outputdmfp`/`eigvals.dat` information.
-
-## Provenance manifests
-
-`prepare-maxent`, `prepare-dos`, and `prepare-band` write `manifest.json` containing SHA256 hashes of critical source/control files.
-
-When `pbs STAGE` is run, the manifest is refreshed. This is the **freeze point**: it records the exact inspected input files that correspond to the standalone PBS script.
-
-If a scientific input is changed after that point, `doctor STAGE` reports a manifest mismatch. Re-run:
-
-```bash
-python workflow.py -c config.toml pbs STAGE --force
-```
-
-to freeze the new state before manual submission.
-
-## Common analysis
-
-Read-only analysis can be run in the foreground:
-
-```bash
-python /path/to/edmft_workflow/workflow.py -c PROJECT/config.toml analyze all
-```
-
-It produces:
+Main output:
 
 ```text
-dmft/analysis/convergence/
-    info_iterate_outer.csv
-    occupancy.png/pdf
-    occupancy_difference.png/pdf
-    chemical_potential.png/pdf
-    double_counting.png/pdf
-
-dmft/analysis/self_energy/
-    sigma_matsubara_real.png/pdf
-    sigma_matsubara_imag.png/pdf
-    z_mass_diagnostic.csv
-    sigma_realaxis_real.png/pdf      # when Sig.out exists
-    sigma_realaxis_imag.png/pdf      # when Sig.out exists
-
-dmft/analysis/summary.md
+dmft/band/eigvals.dat
 ```
 
-The reported `Z` and `1/Z` values are low-frequency linear-fit diagnostics. The fit `R^2` and fit-point count are written alongside them; the workflow does not silently assume every self-energy is in a clean Fermi-liquid regime.
+## Foreground MPI configuration
 
-When DOS and band outputs exist, the analysis command also invokes the existing DOS/local-spectral/hybridization and `A(k,w)` plotting helpers.
+```toml
+[foreground]
+dos_np = 8
+band_np = 8
+```
 
-## Safety invariants
+These stages use the native MPI launcher under `[parallel]`, normally Intel MPI.
 
-- no workflow command calls `qsub`;
-- no workflow command mutates the user's login shell or persistent shell configuration;
-- `prepare-*` does not source Intel/MKL or rewrite PATH/LD_LIBRARY_PATH/PYTHONPATH;
-- lightweight official helpers run with explicit Python/script paths and minimal child-only variables;
-- full Intel/MKL/MPI runtime is confined to generated heavy-job PBS scripts (apart from explicitly invoked legacy foreground numerical runners);
-- production PBS scripts are standalone and do not read `config.toml` at runtime;
-- `dft/` is not modified by DMFT preparation;
-- `dmft/` is not modified by MaxEnt/DOS/band preparation;
-- DOS and band are independent sibling real-axis directories;
-- upstream files are copied, never moved;
-- real-axis `1 -> 0` conversion occurs only in copied `indmfl` files;
-- `--force` backs up a non-empty stage directory before recreation;
-- manifests track critical source/control files at preparation and PBS freeze points.
+## Provenance and safety
+
+- `prepare-*` never modifies the upstream calculation directory.
+- `dmft/CASE.indmfl` remains Matsubara flag `1`.
+- DOS/band modify only copied real-axis `indmfl` files.
+- `--force` backs up non-empty prepared stage directories.
+- MaxEnt/DOS/band manifests record critical prepared/source files.
+- DFT/DMFT/MaxEnt PBS scripts are standalone and do not read `config.toml` at runtime.
+- DOS/band foreground runs happen in child shells and do not alter the parent shell.
+
+## Analysis
+
+```bash
+python workflow.py -c config.toml analyze all
+```
+
+This produces convergence, self-energy, DOS/local-spectrum, and `A(k,w)` diagnostics when the required outputs exist.
