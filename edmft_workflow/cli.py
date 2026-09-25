@@ -16,6 +16,9 @@ from .pbs import write_pbs
 from .foreground import run_foreground
 
 
+PLOT_FORMATS = ("png", "pdf", "both")
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="edmft-workflow",
@@ -65,9 +68,21 @@ def _build_parser() -> argparse.ArgumentParser:
 
     runp = sub.add_parser("run", help="Foreground operations")
     runp.add_argument("stage", choices=["dos", "band", "plots"])
+    runp.add_argument(
+        "--format",
+        choices=PLOT_FORMATS,
+        default=None,
+        help="Figure format for 'run plots': png, pdf, or both; overrides plot.format",
+    )
 
     analyze = sub.add_parser("analyze", help="Generate common scientific diagnostics in the foreground")
     analyze.add_argument("stage", nargs="?", choices=["all"], default="all")
+    analyze.add_argument(
+        "--format",
+        choices=PLOT_FORMATS,
+        default=None,
+        help="Figure format: png, pdf, or both; overrides plot.format for this run",
+    )
     return p
 
 
@@ -120,8 +135,8 @@ def _prepare_stage(cfg, stage: str, force: bool) -> None:
         print(f"After inspection, run foreground MPI: python workflow.py -c {cfg.source} run {stage}")
 
 
-def _analyze(cfg) -> None:
-    created = run_analysis(cfg)
+def _analyze(cfg, plot_format: str | None = None) -> None:
+    created = run_analysis(cfg, plot_format=plot_format)
     print("Analysis outputs:")
     for p in created:
         print(f"  {p}")
@@ -175,11 +190,11 @@ def main(argv=None) -> int:
                 run_foreground(cfg, args.stage)
                 return 0
             if args.stage == "plots":
-                _analyze(cfg)
+                _analyze(cfg, plot_format=args.format)
                 return 0
 
         if args.command == "analyze":
-            _analyze(cfg)
+            _analyze(cfg, plot_format=args.format)
             return 0
 
         return 1
