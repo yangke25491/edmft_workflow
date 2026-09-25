@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 import math
+from collections.abc import Iterable
+
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
@@ -17,19 +19,61 @@ LABEL_MAP = {
 }
 
 
-def _save(fig, stem: Path) -> None:
+def resolve_plot_formats(cfg, override: str | Iterable[str] | None = None) -> tuple[str, ...]:
+    """Resolve requested figure formats to a normalized tuple of png/pdf.
+
+    Accepted user-facing modes are ``png``, ``pdf``, or ``both``.  The command
+    line override wins; otherwise ``plot.format`` from config is used; the
+    backwards-compatible default is ``both``.
+    """
+    raw = override if override is not None else cfg.get("plot.format", "both")
+    if isinstance(raw, str):
+        mode = raw.strip().lower()
+        if mode == "both":
+            return ("png", "pdf")
+        if mode in {"png", "pdf"}:
+            return (mode,)
+        raise WorkflowError("plot format must be one of: png, pdf, both")
+
+    formats = tuple(str(x).strip().lower() for x in raw)
+    if not formats or any(x not in {"png", "pdf"} for x in formats):
+        raise WorkflowError("plot formats must contain only png and/or pdf")
+    # Preserve order while removing duplicates.
+    return tuple(dict.fromkeys(formats))
+
+
+def _save(fig, stem: Path, formats: str | Iterable[str] | None = None, cfg=None) -> list[Path]:
     stem.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(stem.with_suffix(".png"), dpi=300, bbox_inches="tight")
-    fig.savefig(stem.with_suffix(".pdf"), bbox_inches="tight")
+    if cfg is None and formats is None:
+        resolved = ("png", "pdf")
+    elif cfg is None:
+        if isinstance(formats, str):
+            mode = formats.lower()
+            resolved = ("png", "pdf") if mode == "both" else (mode,)
+        else:
+            resolved = tuple(formats)
+    else:
+        resolved = resolve_plot_formats(cfg, formats)
+
+    created: list[Path] = []
+    for fmt in resolved:
+        path = stem.with_suffix(f".{fmt}")
+        if fmt == "png":
+            fig.savefig(path, dpi=300, bbox_inches="tight")
+        else:
+            fig.savefig(path, bbox_inches="tight")
+        created.append(path)
     plt.close(fig)
+    return created
 
 
-def plot_dos(cfg) -> list[Path]:
+def plot_dos(cfg, formats: str | Iterable[str] | None = None) -> list[Path]:
     case = cfg.case
     src = cfg.work_root / "onreal"
     out = cfg.work_root / "results"
     out.mkdir(parents=True, exist_ok=True)
     created: list[Path] = []
+    resolved = resolve_plot_formats(cfg, formats)
 
     cdos = np.loadtxt(require_file(src / f"{case}.cdos"), comments="#")
     xlim = (float(cfg.get("plot.dos_xmin", cfg.get("dos.wmin", -3.0))),
@@ -45,9 +89,7 @@ def plot_dos(cfg) -> list[Path]:
     ax.set_ylabel("DOS")
     ax.legend()
     fig.tight_layout()
-    stem = out / "dos_total"
-    _save(fig, stem)
-    created.append(stem.with_suffix(".png"))
+    created += _save(fig, out / "dos_total", resolved)
 
     gc = np.loadtxt(require_file(src / f"{case}.gc1"), comments="#")
     nch = (gc.shape[1] - 1) // 2
@@ -63,9 +105,7 @@ def plot_dos(cfg) -> list[Path]:
     ax.set_ylabel(r"$A(\omega)=-\mathrm{Im}G/\pi$")
     ax.legend()
     fig.tight_layout()
-    stem = out / "spectral_local"
-    _save(fig, stem)
-    created.append(stem.with_suffix(".png"))
+    created += _save(fig, out / "spectral_local", resolved)
 
     dlt = np.loadtxt(require_file(src / f"{case}.dlt1"), comments="#")
     nch = (dlt.shape[1] - 1) // 2
@@ -80,17 +120,16 @@ def plot_dos(cfg) -> list[Path]:
     ax.set_ylabel(r"$-\mathrm{Im}\Delta(\omega)$")
     ax.legend()
     fig.tight_layout()
-    stem = out / "hybridization"
-    _save(fig, stem)
-    created.append(stem.with_suffix(".png"))
+    created += _save(fig, out / "hybridization", resolved)
     return created
 
 
-def plot_self_energy(cfg) -> list[Path]:
+def plot_self_energy(cfg, formats: str | Iterable[str] | None = None) -> list[Path]:
     out = cfg.work_root / "results"
     out.mkdir(parents=True, exist_ok=True)
     created: list[Path] = []
     labels = cfg.get("plot.orbital_labels", [])
+    resolved = resolve_plot_formats(cfg, formats)
     for source, name, xlabel in [
         (cfg.work_root / "maxent" / "sig.inpx", "sigma_matsubara", r"$\omega_n$ (eV)"),
         (cfg.work_root / "maxent" / "Sig.out", "sigma_realaxis", r"$\omega$ (eV)"),
@@ -109,9 +148,7 @@ def plot_self_energy(cfg) -> list[Path]:
         ax.set_ylabel(r"$-\mathrm{Im}\Sigma$")
         ax.legend()
         fig.tight_layout()
-        stem = out / name
-        _save(fig, stem)
-        created.append(stem.with_suffix(".png"))
+        created += _save(fig, out / name, resolved)
     return created
 
 
@@ -203,7 +240,7 @@ def _hist_cutoff(a: np.ndarray, intensity: float) -> float:
     return float(centers[i])
 
 
-def plot_akw(cfg) -> Path:
+def plot_akw(cfg, formats: str | Iterable[str] | None = None) -> list[Path]:
     band = cfg.work_root / "band"
     case = cfg.case
     require_file(band / "eigvals.dat")
@@ -244,7 +281,6 @@ def plot_akw(cfg) -> Path:
         ymax = float(cfg.get("plot.akw_ymax", omega[-1]))
         ax.set_ylim(ymin, ymax)
     fig.tight_layout()
-    stem = out / "Akw"
-    _save(fig, stem)
+    created = _save(fig, out / "Akw", resolve_plot_formats(cfg, formats))
     print(f"A(k,w): nk={eig.shape[0]}, nomega={len(omega)}, mu={mu:.9f}, cutoff={vmax:.6g}")
-    return stem.with_suffix(".png")
+    return created
