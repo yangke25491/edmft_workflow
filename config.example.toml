@@ -104,6 +104,9 @@ band_np = 8
 z_fit_points = 4
 
 [plot]
+# Default figure output: "png", "pdf", or "both".
+# analyze/run plots --format overrides this for one invocation.
+format = "both"
 orbital_labels = ["eg", "t2g"]
 cdos_labels = ["Total DOS", "Mn-d"]
 dos_xmin = -3.0
