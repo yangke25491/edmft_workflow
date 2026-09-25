@@ -4,6 +4,7 @@ from pathlib import Path
 import csv
 import math
 import re
+from collections.abc import Iterable
 
 import matplotlib
 matplotlib.use("Agg")
@@ -11,18 +12,22 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from .checks import convergence_report, last_of_each_outer, parse_info_iterate
-from .plotting import plot_akw, plot_dos
+from .plotting import plot_akw, plot_dos, resolve_plot_formats
 from .utils import WorkflowError, require_file
 
 
-def _save(fig, stem: Path) -> list[Path]:
+def _save(fig, stem: Path, formats: Iterable[str]) -> list[Path]:
     stem.parent.mkdir(parents=True, exist_ok=True)
-    png = stem.with_suffix(".png")
-    pdf = stem.with_suffix(".pdf")
-    fig.savefig(png, dpi=300, bbox_inches="tight")
-    fig.savefig(pdf, bbox_inches="tight")
+    created: list[Path] = []
+    for fmt in formats:
+        path = stem.with_suffix(f".{fmt}")
+        if fmt == "png":
+            fig.savefig(path, dpi=300, bbox_inches="tight")
+        else:
+            fig.savefig(path, bbox_inches="tight")
+        created.append(path)
     plt.close(fig)
-    return [png, pdf]
+    return created
 
 
 def _load_sigma(path: Path) -> np.ndarray:
@@ -53,7 +58,7 @@ def _latest_sigma(dmft_dir: Path, impurity: int) -> Path:
     return found[-1][1]
 
 
-def analyze_convergence(cfg) -> tuple[list[Path], dict]:
+def analyze_convergence(cfg, formats: Iterable[str]) -> tuple[list[Path], dict]:
     """Export convergence history and simple diagnostic plots."""
     root = cfg.dmft_dir / "analysis" / "convergence"
     root.mkdir(parents=True, exist_ok=True)
@@ -87,7 +92,7 @@ def analyze_convergence(cfg) -> tuple[list[Path], dict]:
     ax.set_ylabel("occupancy")
     ax.legend()
     fig.tight_layout()
-    created += _save(fig, root / "occupancy")
+    created += _save(fig, root / "occupancy", formats)
 
     fig, ax = plt.subplots(figsize=(7, 5))
     ax.plot(x, dn, marker="o")
@@ -95,21 +100,21 @@ def analyze_convergence(cfg) -> tuple[list[Path], dict]:
     ax.set_xlabel("outer DMFT cycle")
     ax.set_ylabel(r"$|n_{latt}-n_{imp}|$")
     fig.tight_layout()
-    created += _save(fig, root / "occupancy_difference")
+    created += _save(fig, root / "occupancy_difference", formats)
 
     fig, ax = plt.subplots(figsize=(7, 5))
     ax.plot(x, mu, marker="o")
     ax.set_xlabel("outer DMFT cycle")
     ax.set_ylabel(r"$\mu$ (eV)")
     fig.tight_layout()
-    created += _save(fig, root / "chemical_potential")
+    created += _save(fig, root / "chemical_potential", formats)
 
     fig, ax = plt.subplots(figsize=(7, 5))
     ax.plot(x, vdc, marker="o")
     ax.set_xlabel("outer DMFT cycle")
     ax.set_ylabel(r"$V_{dc}$ (eV)")
     fig.tight_layout()
-    created += _save(fig, root / "double_counting")
+    created += _save(fig, root / "double_counting", formats)
 
     return created, report
 
@@ -137,7 +142,7 @@ def _fit_z(
     return float(slope), float(intercept), float(r2), float(z), float(mass)
 
 
-def analyze_self_energy(cfg) -> tuple[list[Path], list[dict], Path]:
+def analyze_self_energy(cfg, formats: Iterable[str]) -> tuple[list[Path], list[dict], Path]:
     """Plot Matsubara/real-axis self-energy and export low-frequency Z diagnostics."""
     root = cfg.dmft_dir / "analysis" / "self_energy"
     root.mkdir(parents=True, exist_ok=True)
@@ -160,7 +165,7 @@ def analyze_self_energy(cfg) -> tuple[list[Path], list[dict], Path]:
     ax.set_ylabel(r"Re $\Sigma(i\omega_n)$ (eV)")
     ax.legend()
     fig.tight_layout()
-    created += _save(fig, root / "sigma_matsubara_real")
+    created += _save(fig, root / "sigma_matsubara_real", formats)
 
     fig, ax = plt.subplots(figsize=(7, 5))
     for i in range(nch):
@@ -170,7 +175,7 @@ def analyze_self_energy(cfg) -> tuple[list[Path], list[dict], Path]:
     ax.set_ylabel(r"-Im $\Sigma(i\omega_n)$ (eV)")
     ax.legend()
     fig.tight_layout()
-    created += _save(fig, root / "sigma_matsubara_imag")
+    created += _save(fig, root / "sigma_matsubara_imag", formats)
 
     zrows: list[dict] = []
     for i in range(nch):
@@ -209,7 +214,7 @@ def analyze_self_energy(cfg) -> tuple[list[Path], list[dict], Path]:
         ax.set_ylabel(r"Re $\Sigma(\omega)$ (eV)")
         ax.legend()
         fig.tight_layout()
-        created += _save(fig, root / "sigma_realaxis_real")
+        created += _save(fig, root / "sigma_realaxis_real", formats)
 
         fig, ax = plt.subplots(figsize=(7, 5))
         for i in range(nr):
@@ -220,7 +225,7 @@ def analyze_self_energy(cfg) -> tuple[list[Path], list[dict], Path]:
         ax.set_ylabel(r"-Im $\Sigma(\omega)$ (eV)")
         ax.legend()
         fig.tight_layout()
-        created += _save(fig, root / "sigma_realaxis_imag")
+        created += _save(fig, root / "sigma_realaxis_imag", formats)
 
     return created, zrows, source
 
@@ -269,19 +274,24 @@ def write_summary(cfg, report: dict, zrows: list[dict], sigma_source: Path, extr
     return summary
 
 
-def run_analysis(cfg) -> list[Path]:
-    """Run read-only/common analysis in the foreground."""
-    created, report = analyze_convergence(cfg)
-    sigma_outputs, zrows, sigma_source = analyze_self_energy(cfg)
+def run_analysis(cfg, plot_format: str | None = None) -> list[Path]:
+    """Run read-only/common analysis in the foreground.
+
+    ``plot_format`` accepts png/pdf/both and overrides ``plot.format`` from the
+    project config for this invocation only.
+    """
+    formats = resolve_plot_formats(cfg, plot_format)
+    created, report = analyze_convergence(cfg, formats)
+    sigma_outputs, zrows, sigma_source = analyze_self_energy(cfg, formats)
     created += sigma_outputs
 
     # Existing plotting helpers provide DOS/local spectra and A(k,w). They are
     # only called when their upstream outputs are present.
     onreal = cfg.dmft_dir / "onreal"
     if (onreal / f"{cfg.case}.cdos").exists():
-        created += plot_dos(cfg)
+        created += plot_dos(cfg, formats)
     if (cfg.dmft_dir / "band" / "eigvals.dat").exists():
-        created.append(plot_akw(cfg))
+        created += plot_akw(cfg, formats)
 
     summary = write_summary(cfg, report, zrows, sigma_source, created)
     created.append(summary)
