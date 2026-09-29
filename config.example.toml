@@ -1,60 +1,91 @@
+# Generic project-local configuration.
+# Put this file at PROJECT/config.toml.
+# root_dir = "." means the directory containing this config file.
+# Replace placeholder environment and scheduler values for your own site.
+#
+# Scientific native inputs can be kept in PROJECT/inputs/:
+#   inputs/params.dat
+#   inputs/maxent_params.dat
+#   inputs/CASE.klist_band
+# Native files take priority over generated fallbacks.
+#
+# Environment policy:
+# - prepare-* never modifies your login shell and does not source Intel/MKL.
+# - lightweight eDMFT helpers are called through absolute configured paths.
+# - DFT, DMFT, and MaxEnt use standalone PBS scripts.
+# - DOS and band are run in foreground MPI child shells; the parent shell is unchanged.
+
 [project]
 case = "01"
-dmft_dir = "/home/USER/path/to/converged_dmft"
-# All post-processing is created here. Keep this outside the frozen run_dmft.py directory.
-work_root = "/home/USER/path/to/converged_dmft/postprocess"
+root_dir = "."
+scratch_dir = "dft/tmp"
+dmft_scratch_dir = "dmft/tmp"
 
 [environment]
 wienroot = "/home/USER/apps/edmft/wien2k"
 edmft_root = "/home/USER/apps/edmft/eDMFT/bin"
 python = "/home/USER/miniforge3/envs/edmft/bin/python"
 python_bin_dir = "/home/USER/miniforge3/envs/edmft/bin"
-# Optional: source site/compiler/MPI setup before every external command and PBS job.
-# setup_script = "/home/USER/.config/edmft_workflow/env.sh"
+intel_root = "/path/to/intel"
+intel_arch = "intel64"
+fftw_lib = "/path/to/fftw/lib"
+ulimit_stack = "unlimited"
+ulimit_core = "unlimited"
 
-# Extra environment values exported by the workflow.
 [environment_extra]
-OMP_NUM_THREADS = "1"
-MKL_NUM_THREADS = "1"
 I_MPI_HYDRA_BOOTSTRAP = "ssh"
 I_MPI_FABRICS = "shm"
 
-[commands]
-dmft_copy = "dmft_copy.py"
-saverage = "saverage.py"
-maxent = "maxent_run.py"
-x_dmft = "x_dmft.py"
-wien_x = "x"
+[parallel]
+# Native WIEN2k/eDMFT MPI stack used by DMFT and foreground DOS/band.
+mpi_launcher = "/path/to/mpirun"
+mpi_np_flag = "-np"
+write_mpi_prefix2 = true
+wien_machines_mode = "single_node_compact"
+dmft_wien_machines = false
+
+[dft]
+run_command = "/home/USER/apps/edmft/wien2k/run_lapw -p -cc 0.0001 -ec 0.0001 -i 100"
+
+[dmft_params]
+solver = "CTQMC"
+DCs = "nominal"
+max_dmft_iterations = 1
+max_lda_iterations = 100
+
+[impurity0]
+# Prefer PROJECT/inputs/params.dat. Fill these only for generated fallback.
+# exe = "ctqmc"
+# U = 8.0
+# J = 0.8
+# beta = 100.0
+# nf0 = 5.0
+# M = 5000000
+
+[dmft_prepare]
+initial_sigma = "szero"
+szero_args = []
 
 [convergence]
-# This is a workflow sanity threshold, not a universal physical law.
 max_dn = 0.005
 outer_drift = 0.005
-# If true, MaxEnt refuses to start when the checks above fail.
 block_postprocess = true
 
-[maxent]
-impurity = 1
-average_last = 5
+[fermi]
+# Warning-only consistency tolerance. Fermi-level warnings never block runs.
+tolerance_eV = 1e-6
 
-# Haule MnO tutorial-style defaults. Override per material if needed.
-[maxent_params]
-statistics = "fermi"
-Ntau = 300
-L = 20.0
-x0 = 0.005
-bwdth = 0.004
-Nw = 300
-gwidth = 30.0
-idg = 1
-deltag = 0.004
-Asteps = 4000
-alpha0 = 1000
-min_ratio = 0.001
-iflat = 1
-Nitt = 1000
-Nr = 0
-Nf = 40
+[post]
+impurity = 1
+average_last = 3
+
+[maxent]
+# Use the MPI launcher that matches the configured mpi4py environment.
+# Override only if needed:
+# mpi_launcher = "/home/USER/miniforge3/envs/edmft/bin/mpirun"
+mpi_np_flag = "-np"
+# prepare-maxent writes dmft/maxent/sig.inpx and maxent_params.dat.
+# MPI scaling is limited by the number of active MaxEnt baths/channels.
 
 [dos]
 nomega = 200
@@ -65,42 +96,49 @@ wmax = 1.0
 nomega = 200
 wmin = -6.0
 wmax = 6.0
-# WIEN2k template syntax:
-#   @wien:fcc.klist -> $WIENROOT/SRC_templates/fcc.klist
-# For a custom path, give an absolute path to your own case.klist_band.
 klist_source = "@wien:fcc.klist"
 
+# DOS and band are foreground MPI postprocessing. Adjust ranks for your allocation.
+[foreground]
+dos_np = 1
+band_np = 1
+
+[analysis]
+z_fit_points = 4
+
 [plot]
+# Default figure output: "png", "pdf", or "both".
+# analyze/run plots --format overrides this for one invocation.
+format = "both"
 orbital_labels = ["eg", "t2g"]
 cdos_labels = ["Total DOS", "Mn-d"]
 dos_xmin = -3.0
 dos_xmax = 1.0
 akw_intensity = 0.97
-# Hide line labels if you only want endpoint labels on the final figure.
 drop_klabels = ["LAMBDA", "DELTA", "Z"]
-# Optional display window; omit to use the entire computed real-frequency range.
-# akw_ymin = -6.0
-# akw_ymax = 6.0
 
+# PBS is reserved for the heavy stages: DFT, DMFT, MaxEnt.
+# The values below are intentionally minimal placeholders; tune them for your site.
 [pbs]
-qsub = "qsub"
 queue = "batch"
 nodes = 1
-ppn = 8
-mem = "16gb"
+ppn = 1
 walltime = "04:00:00"
+
+[pbs_dft]
+job_name = "DFT"
+ppn = 1
+walltime = "04:00:00"
+mem = ""
+
+[pbs_dmft]
+job_name = "DMFT"
+ppn = 1
+walltime = "04:00:00"
+mem = ""
 
 [pbs_maxent]
-ppn = 8
-mem = "16gb"
+job_name = "MaxEnt"
+ppn = 1
 walltime = "04:00:00"
-
-[pbs_dos]
-ppn = 8
-mem = "16gb"
-walltime = "04:00:00"
-
-[pbs_band]
-ppn = 8
-mem = "16gb"
-walltime = "04:00:00"
+mem = ""

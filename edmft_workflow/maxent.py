@@ -6,7 +6,30 @@ import shutil
 import numpy as np
 
 from .checks import convergence_report, format_convergence
-from .utils import WorkflowError, require_file, safe_prepare_dir, run_stage
+from .fermi import copy_fermi_snapshot
+from .provenance import write_stage_manifest
+from .utils import WorkflowError, require_file, safe_prepare_dir, run_edmft_helper
+
+
+OFFICIAL_MAXENT_PARAMS = """params={'statistics': 'fermi', # fermi/bose
+    'Ntau'      : 400,     # Number of time points
+    'L'         : 30.0,    # cutoff frequency on real axis
+    'x0'        : 0.01,    # low energy cut-off
+    'bwdth'     : 0.004,   # smoothing width
+    'Nw'        : 450,     # number of frequency points on real axis
+    'gwidth'    : 2*15.0,  # width of gaussian
+    'idg'       : 1,       # error scheme: idg=1 -> sigma=deltag ; idg=0 -> sigma=deltag*G(tau)
+    'deltag'    : 0.01,    # error
+    'Asteps'    : 4000,    # annealing steps
+    'alpha0'    : 1000,    # starting alpha
+    'min_ratio' : 0.001,   # stopping ratio
+    'iflat'     : 1,       # 0 constant model; 1 gaussian; 2 model.dat
+    'Nitt'      : 500,     # maximum number of outside iterations
+    'Nr'        : 0,       # number of smoothing runs
+    'Nf'        : 40,      # high-frequency points used in inverse Fourier
+    'SymCum'    : True,    # symmetrize local cumulant when possible
+    }
+"""
 
 
 def _sig_key(path: Path, impurity: int) -> int | None:
@@ -23,8 +46,7 @@ def select_self_energies(dmft_dir: Path, impurity: int, nlast: int) -> list[Path
     found.sort(key=lambda x: x[0])
     if len(found) < nlast:
         raise WorkflowError(
-            f"Need {nlast} converged self-energy files for impurity {impurity}, "
-            f"but found only {len(found)}"
+            f"Need {nlast} self-energy files for impurity {impurity}, but found only {len(found)}"
         )
     return [p for _, p in found[-nlast:]]
 
@@ -32,7 +54,10 @@ def select_self_energies(dmft_dir: Path, impurity: int, nlast: int) -> list[Path
 def validate_same_grid(files: list[Path]) -> None:
     ref = None
     for path in files:
-        data = np.loadtxt(path, comments="#")
+        try:
+            data = np.loadtxt(path, comments="#")
+        except ValueError as exc:
+            raise WorkflowError(f"Could not parse numerical self-energy data in {path}: {exc}") from exc
         if data.ndim != 2 or data.shape[1] < 3:
             raise WorkflowError(f"Unexpected self-energy shape in {path}: {data.shape}")
         if ref is None:
@@ -41,26 +66,18 @@ def validate_same_grid(files: list[Path]) -> None:
             raise WorkflowError(f"Matsubara grids differ: {files[0]} vs {path}")
 
 
-def render_maxent_params(cfg) -> str:
-    defaults = {
-        "statistics": "fermi", "Ntau": 300, "L": 20.0, "x0": 0.005,
-        "bwdth": 0.004, "Nw": 300, "gwidth": 30.0, "idg": 1,
-        "deltag": 0.004, "Asteps": 4000, "alpha0": 1000,
-        "min_ratio": 0.001, "iflat": 1, "Nitt": 1000, "Nr": 0, "Nf": 40,
-    }
-    user = cfg.section("maxent_params")
-    defaults.update(user)
-    lines = ["params={"]
-    for key, value in defaults.items():
-        if isinstance(value, str):
-            lines.append(f"    {key!r}: {value!r},")
-        else:
-            lines.append(f"    {key!r}: {value},")
-    lines.append("}")
-    return "\n".join(lines) + "\n"
+def active_maxent_baths(path: Path) -> int:
+    """Count nonzero complex self-energy channels exactly as maxent_run.py does."""
+    data = np.loadtxt(path, comments="#").T
+    nonzero_columns = 0
+    for row in data[1:]:
+        if np.sum(np.abs(row)) > 0:
+            nonzero_columns += 1
+    return nonzero_columns // 2
 
 
 def prepare_maxent(cfg, force: bool = False) -> Path:
+    """Prepare official MaxEnt inputs without running the expensive continuation."""
     report = convergence_report(
         cfg.dmft_dir,
         max_dn=float(cfg.get("convergence.max_dn", 5e-3)),
@@ -74,36 +91,72 @@ def prepare_maxent(cfg, force: bool = False) -> Path:
         )
 
     out = safe_prepare_dir(cfg.work_root / "maxent", force=force)
-    impurity = int(cfg.get("maxent.impurity", 1))
-    nlast = int(cfg.get("maxent.average_last", 5))
+    impurity = int(cfg.get("post.impurity", cfg.get("maxent.impurity", 1)))
+    nlast = int(cfg.get("post.average_last", cfg.get("maxent.average_last", 3)))
     files = select_self_energies(cfg.dmft_dir, impurity, nlast)
     validate_same_grid(files)
-    local_files = []
+
+    local_files: list[Path] = []
     for src in files:
         dst = out / src.name
         shutil.copy2(src, dst)
         local_files.append(dst)
-    (out / "maxent_params.dat").write_text(render_maxent_params(cfg), encoding="utf-8")
+
+    selected = out / "selected_sigmas.txt"
+    selected.write_text("\n".join(p.name for p in local_files) + "\n", encoding="utf-8")
+
+    run_edmft_helper(
+        cfg,
+        "saverage.py",
+        [*[p.name for p in local_files], "-o", "sig.inpx"],
+        cwd=out,
+        log=out / "saverage.log",
+    )
+    siginpx = require_file(out / "sig.inpx")
+    nb = active_maxent_baths(siginpx)
+
+    inputs = cfg.root_dir / "inputs"
+    supplied = inputs / "maxent_params.dat"
+    target = out / "maxent_params.dat"
+    sources = {f"self_energy_{i+1}": p for i, p in enumerate(files)}
+    if supplied.exists():
+        require_file(supplied)
+        shutil.copy2(supplied, target)
+        origin = str(supplied)
+        sources["maxent_params"] = supplied
+    else:
+        target.write_text(OFFICIAL_MAXENT_PARAMS, encoding="utf-8")
+        origin = "current upstream maxent_run.py default template"
+
+    # MaxEnt does not recompute the chemical potential.  Keep a local snapshot
+    # of the DMFT EF used by the selected self-energies so later DOS/band stages
+    # can detect stale combinations.  Missing EF is warning-only by design.
+    ef_snapshot = out / "fermi_level.snapshot"
+    ef_value = copy_fermi_snapshot(cfg.dmft_dir / "EF.dat", ef_snapshot)
+
+    prepared = [selected, siginpx, target]
+    if ef_value is not None:
+        prepared.append(ef_snapshot)
+
+    manifest = write_stage_manifest(
+        out,
+        "maxent",
+        sources=sources,
+        prepared=prepared,
+    )
+
     print("Selected self-energies:")
     for p in local_files:
         print(f"  {p.name}")
-    return out
-
-
-def run_maxent(cfg, force: bool = False) -> Path:
-    out = prepare_maxent(cfg, force=force)
-    savg = str(cfg.get("commands.saverage", "saverage.py"))
-    maxent = str(cfg.get("commands.maxent", "maxent_run.py"))
-    files = sorted(out.glob("sig.inp.*.*"), key=lambda p: p.name)
-    run_stage(cfg, [savg, *[p.name for p in files], "-o", "Sig.average"], cwd=out,
-              log=out / "saverage.log")
-    require_file(out / "Sig.average")
-    python = cfg.get("environment.python")
-    if python:
-        cmd = [str(python), maxent, "Sig.average"]
+    print(f"Averaged Matsubara self-energy : {siginpx}")
+    print(f"Active MaxEnt baths/channels   : {nb}")
+    print(f"Useful MaxEnt MPI ranks        : <= {max(1, nb)}")
+    print(f"MaxEnt parameter file          : {target}")
+    print(f"Parameter source               : {origin}")
+    if ef_value is None:
+        print("WARNING: dmft/EF.dat is missing or unreadable; no Fermi-level snapshot was recorded.")
     else:
-        cmd = [maxent, "Sig.average"]
-    run_stage(cfg, cmd, cwd=out, log=out / "maxent.log")
-    require_file(out / "Sig.out")
-    print(f"MaxEnt complete: {out / 'Sig.out'}")
+        print(f"DMFT Fermi-level snapshot      : {ef_snapshot} ({ef_value:.12f} eV)")
+    print(f"Provenance manifest            : {manifest}")
+    print("Inspect sig.inpx and maxent_params.dat before generating the PBS job.")
     return out

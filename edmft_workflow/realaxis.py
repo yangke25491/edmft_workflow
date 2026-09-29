@@ -1,59 +1,181 @@
 from __future__ import annotations
 
 from pathlib import Path
+import difflib
 import shutil
 
+from .fermi import copy_fermi_snapshot, fermi_warnings, read_fermi_level
+from .provenance import write_stage_manifest
 from .utils import (
-    WorkflowError, patch_indmfl, require_file,
-    run_stage, safe_prepare_dir,
+    WorkflowError,
+    copy_case_files,
+    patch_indmfl,
+    require_file,
+    run_edmft_helper,
+    safe_prepare_dir,
 )
 
 
+def _copy_wien_potentials(cfg, out: Path) -> list[Path]:
+    """Copy converged potentials so real-axis work cannot modify dmft/."""
+    case = cfg.case
+    copy_case_files(cfg.dmft_dir, out, case, ["vsp", "vns"], required=False)
+    copy_case_files(
+        cfg.dmft_dir,
+        out,
+        case,
+        ["vspup", "vspdn", "vnsup", "vnsdn", "vrespsum"],
+        required=False,
+    )
+    base_ok = all(
+        (out / f"{case}.{s}").is_file() and (out / f"{case}.{s}").stat().st_size > 0
+        for s in ("vsp", "vns")
+    )
+    spin_ok = all(
+        (out / f"{case}.{s}").is_file() and (out / f"{case}.{s}").stat().st_size > 0
+        for s in ("vspup", "vspdn", "vnsup", "vnsdn")
+    )
+    if not (base_ok or spin_ok):
+        raise WorkflowError(
+            "Real-axis directory needs converged potential files: case.vsp+case.vns "
+            "or vspup/vspdn/vnsup/vnsdn."
+        )
+    copied = []
+    for suffix in ("vsp", "vns", "vspup", "vspdn", "vnsup", "vnsdn", "vrespsum"):
+        p = out / f"{case}.{suffix}"
+        if p.is_file() and p.stat().st_size > 0:
+            copied.append(p)
+    return copied
+
+
+def _indmfl_flag(path: Path) -> int:
+    require_file(path)
+    lines = path.read_text(errors="ignore").splitlines()
+    if len(lines) < 2 or not lines[1].split():
+        raise WorkflowError(f"Malformed indmfl file: {path}")
+    try:
+        return int(lines[1].split()[0])
+    except ValueError as exc:
+        raise WorkflowError(f"Invalid Matsubara flag in {path}: {lines[1]}") from exc
+
+
+def _prepare_real_axis_indmfl(path: Path, nomega: int, wmin: float, wmax: float) -> Path:
+    """Preserve the Matsubara input and make the documented 1 -> 0 switch."""
+    require_file(path)
+    before = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    original_flag = _indmfl_flag(path)
+    if original_flag != 1:
+        raise WorkflowError(
+            f"Expected Matsubara flag 1 before real-axis conversion, found {original_flag} in {path}"
+        )
+
+    backup = path.with_name(path.name + ".matsubara")
+    shutil.copy2(path, backup)
+    patch_indmfl(path, matsubara=0, nomega=nomega, wmin=wmin, wmax=wmax)
+    if _indmfl_flag(path) != 0:
+        raise WorkflowError(f"Failed to switch Matsubara flag from 1 to 0 in {path}")
+
+    after = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    diff = path.parent / "indmfl.diff"
+    diff.write_text(
+        "".join(difflib.unified_diff(before, after, fromfile=backup.name, tofile=path.name)),
+        encoding="utf-8",
+    )
+    return backup
+
+
 def prepare_dos(cfg, force: bool = False) -> Path:
+    """Prepare a standalone real-axis DOS directory; do not run numerical jobs.
+
+    dmft_copy.py is the only upstream helper invoked here and runs with the
+    lightweight prepare-helper policy. The Intel/MKL/MPI runtime is introduced
+    later only in the foreground DOS execution child shell.
+    """
     case = cfg.case
     source = cfg.dmft_dir
-    out = safe_prepare_dir(cfg.work_root / "onreal", force=force)
-    dmft_copy = str(cfg.get("commands.dmft_copy", "dmft_copy.py"))
-    run_stage(cfg, [dmft_copy, str(source)], cwd=out, log=out / "dmft_copy.log")
+    source_indmfl = require_file(source / f"{case}.indmfl")
+    require_file(source / "info.iterate")
+    sig = require_file(source / "maxent" / "Sig.out")
 
-    sig = cfg.work_root / "maxent" / "Sig.out"
-    require_file(sig)
-    shutil.copy2(sig, out / "sig.inp")
+    out = safe_prepare_dir(source / "onreal", force=force)
 
-    indmfl = out / f"{case}.indmfl"
-    require_file(indmfl)
-    shutil.copy2(indmfl, out / f"{case}.indmfl.matsubara")
-    patch_indmfl(
+    # Official semantics: dmft_copy.py SOURCE copies SOURCE into cwd, including
+    # EF.dat when present.  We additionally keep explicit snapshots for warning-
+    # only stale-state checks; missing/mismatched EF never blocks this prepare.
+    run_edmft_helper(
+        cfg,
+        "dmft_copy.py",
+        [str(source)],
+        cwd=out,
+        log=out / "dmft_copy.log",
+    )
+    potentials = _copy_wien_potentials(cfg, out)
+
+    sig_target = out / "sig.inp"
+    shutil.copy2(sig, sig_target)
+
+    stage_ef = out / "EF.dat"
+    ef_snapshot = out / "fermi_level.snapshot"
+    ef_value = copy_fermi_snapshot(source / "EF.dat", ef_snapshot)
+    maxent_ef_snapshot = out / "maxent_fermi_level.snapshot"
+    maxent_ef_value = copy_fermi_snapshot(source / "maxent" / "fermi_level.snapshot", maxent_ef_snapshot)
+
+    indmfl = require_file(out / f"{case}.indmfl")
+    backup = _prepare_real_axis_indmfl(
         indmfl,
-        matsubara=0,
         nomega=int(cfg.get("dos.nomega", 200)),
         wmin=float(cfg.get("dos.wmin", -3.0)),
         wmax=float(cfg.get("dos.wmax", 1.0)),
     )
-    return out
 
+    prepare_log = out / "prepare.log"
+    prepare_log.write_text(
+        "\n".join([
+            f"source_dmft={source}",
+            f"self_energy_source={sig}",
+            f"self_energy_target={sig_target}",
+            f"indmfl_source={source_indmfl}",
+            f"indmfl_backup={backup}",
+            f"stage_EF={stage_ef}",
+            f"stage_EF_eV={read_fermi_level(stage_ef)}",
+            f"dmft_EF_snapshot={ef_snapshot if ef_value is not None else 'missing'}",
+            f"maxent_EF_snapshot={maxent_ef_snapshot if maxent_ef_value is not None else 'missing'}",
+            "matsubara_flag=0",
+            f"nomega={int(cfg.get('dos.nomega', 200))}",
+            f"wmin={float(cfg.get('dos.wmin', -3.0))}",
+            f"wmax={float(cfg.get('dos.wmax', 1.0))}",
+        ]) + "\n",
+        encoding="utf-8",
+    )
 
-def run_dos(cfg, force: bool = False) -> Path:
-    case = cfg.case
-    out = prepare_dos(cfg, force=force)
-    wien_x = str(cfg.get("commands.wien_x", "x"))
-    xdmft = str(cfg.get("commands.x_dmft", "x_dmft.py"))
+    prepared = [backup, indmfl, sig_target, out / "indmfl.diff", prepare_log, *potentials]
+    if stage_ef.is_file() and stage_ef.stat().st_size > 0:
+        prepared.append(stage_ef)
+    if ef_value is not None:
+        prepared.append(ef_snapshot)
+    if maxent_ef_value is not None:
+        prepared.append(maxent_ef_snapshot)
 
-    run_stage(cfg, [wien_x, "lapw0", "-f", case], cwd=out, log=out / "lapw0.log")
-    run_stage(cfg, [xdmft, "lapw1"], cwd=out, log=out / "lapw1.log")
-    require_file(out / f"{case}.vector")
-    require_file(out / f"{case}.energy")
+    manifest = write_stage_manifest(
+        out,
+        "dos",
+        sources={
+            "matsubara_indmfl": source_indmfl,
+            "real_axis_self_energy": sig,
+        },
+        prepared=prepared,
+    )
 
-    run_stage(cfg, [xdmft, "dmft1"], cwd=out, log=out / "dmft1.log")
-    marker_ok = False
-    for p in [out / "dmft1.log", out / f"{case}.outputdmf1"]:
-        if p.exists() and "DMFT1 END" in p.read_text(errors="ignore"):
-            marker_ok = True
-            break
-    if not marker_ok:
-        raise WorkflowError("dmft1 did not report 'DMFT1 END'")
-
-    for name in [f"{case}.cdos", f"{case}.gc1", f"{case}.dlt1", f"{case}.Eimp1"]:
-        require_file(out / name)
-    print(f"Real-axis DOS complete: {out}")
+    print(f"Real-axis DOS directory prepared: {out}")
+    print(f"Self-energy: {sig} -> {sig_target}")
+    print(f"indmfl Matsubara backup: {backup}")
+    print("indmfl Matsubara flag: 1 -> 0")
+    if read_fermi_level(stage_ef) is not None:
+        print(f"Stage Fermi level: {stage_ef} ({read_fermi_level(stage_ef):.12f} eV)")
+    else:
+        print("WARNING: DOS stage has no readable EF.dat; eDMFT may fall back to case.scf2 :FER.")
+    for warning in fermi_warnings(cfg, "dos"):
+        print(f"WARNING: {warning}")
+    print(f"Review changes: {out / 'indmfl.diff'}")
+    print(f"Provenance manifest: {manifest}")
     return out

@@ -5,6 +5,9 @@ from pathlib import Path
 import math
 from typing import Iterable
 
+import numpy as np
+
+from .provenance import verify_stage_manifest
 from .utils import WorkflowError, require_file, count_klist_points, grep_int
 
 
@@ -125,22 +128,180 @@ def format_convergence(report: dict) -> str:
     return "\n".join(lines)
 
 
-def doctor(cfg) -> list[tuple[str, bool, str]]:
+def _file_check(name: str, path: Path) -> tuple[str, bool, str]:
+    ok = path.exists() and path.is_file() and path.stat().st_size > 0
+    return name, ok, str(path)
+
+
+def _any_file_check(name: str, paths: list[Path]) -> tuple[str, bool, str]:
+    found = [p for p in paths if p.is_file() and p.stat().st_size > 0]
+    return name, bool(found), str(found[0]) if found else " | ".join(str(p) for p in paths)
+
+
+def _indmfl_flag(path: Path) -> int | None:
+    if not path.exists() or path.stat().st_size == 0:
+        return None
+    lines = path.read_text(errors="ignore").splitlines()
+    if len(lines) < 2:
+        return None
+    try:
+        return int(lines[1].split()[0])
+    except (ValueError, IndexError):
+        return None
+
+
+def _sigma_table_check(name: str, path: Path) -> tuple[str, bool, str]:
+    if not path.is_file() or path.stat().st_size == 0:
+        return name, False, str(path)
+    try:
+        data = np.loadtxt(path, comments="#")
+    except (OSError, ValueError) as exc:
+        return name, False, f"parse error: {exc}"
+    if data.ndim != 2 or data.shape[1] < 3 or (data.shape[1] - 1) % 2:
+        return name, False, f"unexpected shape={data.shape}"
+    if not np.all(np.isfinite(data)):
+        return name, False, "contains NaN/Inf"
+    return name, True, f"points={data.shape[0]} channels={(data.shape[1]-1)//2}"
+
+
+def _manifest_check(root: Path) -> tuple[str, bool, str]:
+    ok, detail = verify_stage_manifest(root)
+    return "manifest snapshot", ok, detail
+
+
+def _optional_pbs(checks: list[tuple[str, bool, str]], path: Path) -> None:
+    if path.exists():
+        checks.append(_file_check(path.name, path))
+
+
+def doctor_dft(cfg) -> list[tuple[str, bool, str]]:
+    root = cfg.dft_dir
+    case = cfg.case
+    checks = [
+        _file_check("case.struct", root / f"{case}.struct"),
+        _file_check("case.in0", root / f"{case}.in0"),
+        _any_file_check("case.in1/in1c", [root / f"{case}.in1", root / f"{case}.in1c"]),
+        _any_file_check("case.in2/in2c", [root / f"{case}.in2", root / f"{case}.in2c"]),
+        _file_check("case.klist", root / f"{case}.klist"),
+        _file_check("case.scf", root / f"{case}.scf"),
+        _file_check("case.indmf", root / f"{case}.indmf"),
+        _file_check("case.indmfl", root / f"{case}.indmfl"),
+        _file_check("case.indmfi", root / f"{case}.indmfi"),
+    ]
+    indmfl = root / f"{case}.indmfl"
+    if indmfl.exists():
+        checks.append(("case.indmfl flag", _indmfl_flag(indmfl) == 1, f"found={_indmfl_flag(indmfl)} expected=1"))
+    _optional_pbs(checks, root / "run_dft.pbs")
+    return checks
+
+
+def doctor_dmft(cfg) -> list[tuple[str, bool, str]]:
     dmft = cfg.dmft_dir
     case = cfg.case
     checks: list[tuple[str, bool, str]] = []
     for rel in [
-        f"{case}.struct", f"{case}.indmfl", "params.dat", "projectorw.dat",
-        "info.iterate",
+        f"{case}.struct", f"{case}.indmfl", f"{case}.indmfi", "params.dat", "sig.inp",
+        "projectorw.dat", "info.iterate",
     ]:
-        p = dmft / rel
-        ok = p.exists() and p.stat().st_size > 0
-        checks.append((rel, ok, str(p)))
-    sigs = sorted(dmft.glob("sig.inp.*.1"))
-    checks.append(("sig.inp.*.1", bool(sigs), f"{len(sigs)} files"))
-    imp = dmft / "imp.0"
-    checks.append(("imp.0/", imp.is_dir(), str(imp)))
+        checks.append(_file_check(rel, dmft / rel))
+    indmfl = dmft / f"{case}.indmfl"
+    checks.append(("case.indmfl flag", _indmfl_flag(indmfl) == 1, f"found={_indmfl_flag(indmfl)} expected=1"))
+    sigs = sorted(dmft.glob("sig.inp.*.*"))
+    checks.append(("sig.inp.*.*", bool(sigs), f"{len(sigs)} files"))
+    impurities = sorted(p for p in dmft.glob("imp.*") if p.is_dir())
+    checks.append(("imp.*/", bool(impurities), f"{len(impurities)} directories"))
+    _optional_pbs(checks, dmft / "run_dmft.pbs")
     return checks
+
+
+def doctor_maxent(cfg) -> list[tuple[str, bool, str]]:
+    root = cfg.dmft_dir / "maxent"
+    checks = [
+        _file_check("selected_sigmas.txt", root / "selected_sigmas.txt"),
+        _sigma_table_check("sig.inpx", root / "sig.inpx"),
+        _file_check("maxent_params.dat", root / "maxent_params.dat"),
+        _manifest_check(root),
+    ]
+    _optional_pbs(checks, root / "run_maxent.pbs")
+    sigout = root / "Sig.out"
+    if sigout.exists():
+        checks.append(_sigma_table_check("Sig.out", sigout))
+    return checks
+
+
+def _dmft1_end(root: Path, case: str) -> tuple[bool, str]:
+    candidates = [root / "dmft1.log", root / f"{case}.outputdmf1"]
+    for path in candidates:
+        if path.exists() and "DMFT1 END" in path.read_text(errors="ignore"):
+            return True, str(path)
+    return False, "DMFT1 END not found in dmft1.log or case.outputdmf1"
+
+
+def doctor_dos(cfg) -> list[tuple[str, bool, str]]:
+    root = cfg.dmft_dir / "onreal"
+    case = cfg.case
+    live = root / f"{case}.indmfl"
+    backup = root / f"{case}.indmfl.matsubara"
+    checks = [
+        _sigma_table_check("sig.inp(real-axis)", root / "sig.inp"),
+        _file_check("case.indmfl", live),
+        ("case.indmfl flag", _indmfl_flag(live) == 0, f"found={_indmfl_flag(live)} expected=0"),
+        _file_check("case.indmfl.matsubara", backup),
+        ("backup flag", _indmfl_flag(backup) == 1, f"found={_indmfl_flag(backup)} expected=1"),
+        _file_check("indmfl.diff", root / "indmfl.diff"),
+        _manifest_check(root),
+    ]
+    if (root / f"{case}.cdos").exists():
+        marker_ok, marker_detail = _dmft1_end(root, case)
+        checks.append(("DMFT1 END", marker_ok, marker_detail))
+        for rel in [f"{case}.cdos", f"{case}.gc1", f"{case}.dlt1", f"{case}.Eimp1"]:
+            checks.append(_file_check(rel, root / rel))
+    return checks
+
+
+def doctor_band(cfg) -> list[tuple[str, bool, str]]:
+    root = cfg.dmft_dir / "band"
+    case = cfg.case
+    live = root / f"{case}.indmfl"
+    backup = root / f"{case}.indmfl.matsubara"
+    klist = root / f"{case}.klist_band"
+    checks = [
+        _sigma_table_check("sig.inp(real-axis)", root / "sig.inp"),
+        _file_check("case.klist_band", klist),
+        _file_check("case.indmfl", live),
+        ("case.indmfl flag", _indmfl_flag(live) == 0, f"found={_indmfl_flag(live)} expected=0"),
+        _file_check("case.indmfl.matsubara", backup),
+        ("backup flag", _indmfl_flag(backup) == 1, f"found={_indmfl_flag(backup)} expected=1"),
+        _file_check("indmfl.diff", root / "indmfl.diff"),
+        _manifest_check(root),
+    ]
+    if klist.exists() and klist.stat().st_size > 0:
+        try:
+            checks.append(("k-point count", True, str(count_klist_points(klist))))
+        except WorkflowError as exc:
+            checks.append(("k-point count", False, str(exc)))
+    if (root / "eigvals.dat").exists():
+        result = validate_band_outputs(root, case)
+        checks.append((
+            "band outputs",
+            bool(result["ok"]),
+            f"klist={result['expected']} numkpt={result['numkpt']} tot-k={result['totk']} eigvals={result['eigvals_blocks']}",
+        ))
+    return checks
+
+
+def doctor(cfg, stage: str = "dmft") -> list[tuple[str, bool, str]]:
+    if stage == "dft":
+        return doctor_dft(cfg)
+    if stage == "dmft":
+        return doctor_dmft(cfg)
+    if stage == "maxent":
+        return doctor_maxent(cfg)
+    if stage == "dos":
+        return doctor_dos(cfg)
+    if stage == "band":
+        return doctor_band(cfg)
+    raise WorkflowError(f"Unsupported doctor stage: {stage}")
 
 
 def validate_band_outputs(band_dir: Path, case: str) -> dict:

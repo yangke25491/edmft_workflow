@@ -1,18 +1,26 @@
 from __future__ import annotations
 
 from pathlib import Path
-import re
 import shutil
 
-from .checks import validate_band_outputs
-from .utils import (
-    WorkflowError, count_klist_points, patch_indmfl, require_file,
-    run_stage, safe_prepare_dir,
-)
+from .fermi import copy_fermi_snapshot, fermi_warnings, read_fermi_level
+from .provenance import write_stage_manifest
+from .realaxis import _copy_wien_potentials, _prepare_real_axis_indmfl
+from .utils import WorkflowError, count_klist_points, require_file, run_edmft_helper, safe_prepare_dir
 
 
 def resolve_klist_source(cfg) -> Path:
-    raw = str(cfg.require("band.klist_source"))
+    case = cfg.case
+    explicit = cfg.root_dir / "inputs" / f"{case}.klist_band"
+    if explicit.exists():
+        return explicit
+
+    raw = cfg.get("band.klist_source")
+    if not raw:
+        raise WorkflowError(
+            f"Band path is missing. Provide inputs/{case}.klist_band or set band.klist_source in config.toml."
+        )
+    raw = str(raw)
     if raw.startswith("@wien:"):
         root = cfg.get("environment.wienroot")
         if not root:
@@ -22,80 +30,107 @@ def resolve_klist_source(cfg) -> Path:
 
 
 def prepare_band(cfg, force: bool = False) -> Path:
-    case = cfg.case
-    source = cfg.work_root / "onreal"
-    if not source.exists():
-        raise WorkflowError("Real-axis DOS directory does not exist. Run the DOS stage first.")
-    out = safe_prepare_dir(cfg.work_root / "band", force=force)
-    dmft_copy = str(cfg.get("commands.dmft_copy", "dmft_copy.py"))
-    run_stage(cfg, [dmft_copy, str(source)], cwd=out, log=out / "dmft_copy.log")
+    """Prepare an independent real-axis A(k,w) directory; do not run numerical jobs.
 
-    sig = cfg.work_root / "maxent" / "Sig.out"
-    require_file(sig)
-    shutil.copy2(sig, out / "sig.inp")
+    Preparation uses only lightweight file work plus dmft_copy.py. The heavy
+    Intel/MKL/MPI environment belongs to the later foreground band execution.
+    """
+    case = cfg.case
+    source = cfg.dmft_dir
+    source_indmfl = require_file(source / f"{case}.indmfl")
+    require_file(source / "info.iterate")
+    sig = require_file(source / "maxent" / "Sig.out")
+
+    out = safe_prepare_dir(source / "band", force=force)
+
+    # Start from the converged Matsubara DMFT snapshot, not from DOS/onreal.
+    # dmft_copy.py carries EF.dat when present.  Extra snapshots below are only
+    # for diagnostics and never block preparation or foreground execution.
+    run_edmft_helper(
+        cfg,
+        "dmft_copy.py",
+        [str(source)],
+        cwd=out,
+        log=out / "dmft_copy.log",
+    )
+    potentials = _copy_wien_potentials(cfg, out)
+
+    sig_target = out / "sig.inp"
+    shutil.copy2(sig, sig_target)
+
+    stage_ef = out / "EF.dat"
+    ef_snapshot = out / "fermi_level.snapshot"
+    ef_value = copy_fermi_snapshot(source / "EF.dat", ef_snapshot)
+    maxent_ef_snapshot = out / "maxent_fermi_level.snapshot"
+    maxent_ef_value = copy_fermi_snapshot(source / "maxent" / "fermi_level.snapshot", maxent_ef_snapshot)
 
     ksrc = resolve_klist_source(cfg)
     require_file(ksrc)
-    shutil.copy2(ksrc, out / f"{case}.klist_band")
+    ktarget = out / f"{case}.klist_band"
+    shutil.copy2(ksrc, ktarget)
 
-    indmfl = out / f"{case}.indmfl"
-    require_file(indmfl)
-    patch_indmfl(
+    indmfl = require_file(out / f"{case}.indmfl")
+    backup = _prepare_real_axis_indmfl(
         indmfl,
-        matsubara=0,
         nomega=int(cfg.get("band.nomega", 200)),
         wmin=float(cfg.get("band.wmin", -6.0)),
         wmax=float(cfg.get("band.wmax", 6.0)),
     )
-    expected = count_klist_points(out / f"{case}.klist_band")
-    print(f"Band path contains {expected} k points")
-    return out
+    expected = count_klist_points(ktarget)
 
-
-def _max_finished_kpoint(log: Path) -> int | None:
-    if not log.exists():
-        return None
-    vals = [int(x) for x in re.findall(r"Finished k-point number\s+(\d+)", log.read_text(errors="ignore"))]
-    return max(vals) if vals else None
-
-
-def run_band(cfg, force: bool = False) -> Path:
-    case = cfg.case
-    out = prepare_band(cfg, force=force)
-    xdmft = str(cfg.get("commands.x_dmft", "x_dmft.py"))
-    expected = count_klist_points(out / f"{case}.klist_band")
-
-    for name in [f"{case}.vector", f"{case}.energy", "eigvals.dat"]:
-        p = out / name
-        if p.exists():
-            p.unlink()
-
-    run_stage(cfg, [xdmft, "lapw1", "--band"], cwd=out, log=out / "lapw1_band.log")
-    require_file(out / f"{case}.vector")
-    require_file(out / f"{case}.energy")
-    lapw1_def = out / "lapw1.def"
-    if lapw1_def.exists() and f"{case}.klist_band" not in lapw1_def.read_text(errors="ignore"):
-        raise WorkflowError(f"lapw1.def does not reference {case}.klist_band")
-
-    run_stage(cfg, [xdmft, "dmftp"], cwd=out, log=out / "dmftp.log")
-    require_file(out / "eigvals.dat")
-
-    finished = _max_finished_kpoint(out / "dmftp.log")
-    if finished is not None and finished != expected:
-        raise WorkflowError(
-            f"dmftp processed only {finished} k points, but {expected} are present in {case}.klist_band"
-        )
-
-    result = validate_band_outputs(out, case)
-    if not result["ok"]:
-        raise WorkflowError(
-            "Band sanity check failed: "
-            f"klist={result['expected']} numkpt={result['numkpt']} "
-            f"tot-k={result['totk']} eigvals_blocks={result['eigvals_blocks']}"
-        )
-    print(
-        "Band sanity check: PASS | "
-        f"klist={result['expected']} eigvals={result['eigvals_blocks']} "
-        f"numkpt={result['numkpt']} tot-k={result['totk']}"
+    prepare_log = out / "prepare.log"
+    prepare_log.write_text(
+        "\n".join([
+            f"source_dmft={source}",
+            f"self_energy_source={sig}",
+            f"self_energy_target={sig_target}",
+            f"indmfl_source={source_indmfl}",
+            f"klist_source={ksrc}",
+            f"klist_target={ktarget}",
+            f"kpoints={expected}",
+            f"indmfl_backup={backup}",
+            f"stage_EF={stage_ef}",
+            f"stage_EF_eV={read_fermi_level(stage_ef)}",
+            f"dmft_EF_snapshot={ef_snapshot if ef_value is not None else 'missing'}",
+            f"maxent_EF_snapshot={maxent_ef_snapshot if maxent_ef_value is not None else 'missing'}",
+            "matsubara_flag=0",
+            f"nomega={int(cfg.get('band.nomega', 200))}",
+            f"wmin={float(cfg.get('band.wmin', -6.0))}",
+            f"wmax={float(cfg.get('band.wmax', 6.0))}",
+        ]) + "\n",
+        encoding="utf-8",
     )
+
+    prepared = [backup, indmfl, sig_target, ktarget, out / "indmfl.diff", prepare_log, *potentials]
+    if stage_ef.is_file() and stage_ef.stat().st_size > 0:
+        prepared.append(stage_ef)
+    if ef_value is not None:
+        prepared.append(ef_snapshot)
+    if maxent_ef_value is not None:
+        prepared.append(maxent_ef_snapshot)
+
+    manifest = write_stage_manifest(
+        out,
+        "band",
+        sources={
+            "matsubara_indmfl": source_indmfl,
+            "real_axis_self_energy": sig,
+            "klist_band": ksrc,
+        },
+        prepared=prepared,
+    )
+
+    print(f"Band directory prepared: {out}")
+    print(f"Band path source: {ksrc}")
+    print(f"Band path contains {expected} k points")
+    print(f"Self-energy: {sig} -> {sig_target}")
+    print("indmfl Matsubara flag: 1 -> 0")
+    if read_fermi_level(stage_ef) is not None:
+        print(f"Stage Fermi level: {stage_ef} ({read_fermi_level(stage_ef):.12f} eV)")
+    else:
+        print("WARNING: band stage has no readable EF.dat; eDMFT may fall back to case.scf2 :FER.")
+    for warning in fermi_warnings(cfg, "band"):
+        print(f"WARNING: {warning}")
+    print(f"Review changes: {out / 'indmfl.diff'}")
+    print(f"Provenance manifest: {manifest}")
     return out

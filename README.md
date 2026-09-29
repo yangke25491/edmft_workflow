@@ -1,321 +1,259 @@
 # edmft_workflow
 
-Automation for the post-`run_dmft.py` part of a **WIEN2k + Haule eDMFT** workflow.
+A transparent workflow manager for **WIEN2k + Kristjan Haule eDMFT**.
 
-The goal is to replace fragile manual file juggling with reproducible stages that have explicit sanity checks:
+The workflow automates repetitive file preparation, checks, and runtime setup while keeping the scientific inputs and native WIEN2k/eDMFT commands visible. It never calls `qsub` for you and never modifies the user's persistent shell environment.
 
-```text
-converged run_dmft.py
-        |
-        +--> convergence check (info.iterate)
-        |
-        +--> MaxEnt: Sigma(iwn) -> Sigma(w)
-        |
-        +--> real-axis DOS / Gloc / Delta
-        |
-        +--> band spectral function A(k,w)
-        |
-        +--> PNG/PDF figures
-```
+## Execution model
 
-## Scope of v0.1
-
-This version assumes the main charge-self-consistent DFT+DMFT run has already finished. It automates:
-
-- parsing `info.iterate` and warning on poor `n_latt`/`n_imp` agreement;
-- selecting the last N self-energy iterations and checking that their Matsubara grids match;
-- `saverage.py` + `maxent_params.dat` + `maxent_run.py`;
-- a clean real-axis DOS directory using `dmft_copy.py`, real-axis `case.indmfl`, `lapw0`, `x_dmft.py lapw1`, and `x_dmft.py dmft1`;
-- a separate band directory using `case.klist_band`, `x_dmft.py lapw1 --band`, and `x_dmft.py dmftp`;
-- k-point consistency checks between `case.klist_band`, `case.outputdmfp`, and `eigvals.dat`;
-- independent DOS, local spectral function, hybridization, self-energy, and `A(k,w)` figures;
-- PBS/Torque script generation and dependency-chained submission.
-
-It deliberately keeps **MaxEnt**, **DOS**, and **band** in separate directories so `sig.inp`, `case.vector`, `case.energy`, and `case.indmfl` cannot silently overwrite each other.
-
-## Why the A(k,w) plotter does not require `cakw`
-
-Haule's official `wakplot.py` calls the compiled `cakw` extension. The implementation in this project reproduces the same unit-coherence-factor expression in NumPy:
+The current production model is deliberately split into three classes:
 
 ```text
-A(k,w) = sum_b -Im[1 / (w + mu - e_b(k,w))] / pi
+Heavy PBS jobs
+  DFT
+  DMFT
+  MaxEnt
+
+Foreground MPI postprocessing
+  DOS
+  Band / A(k,w)
+
+Lightweight foreground work
+  prepare-*
+  doctor / check / status
+  analyze / plots
 ```
 
-with the same `small=1e-5` lower bound on the negative imaginary part. This makes plotting headless and removes the `cakw`/`PYTHONPATH` problem for the common case where `cohfactorsd.dat` is absent.
+Only DFT, DMFT, and MaxEnt generate PBS scripts. DOS and band run directly in a disposable foreground child shell with their own MPI setup. The parent/login shell is unchanged after the command exits.
 
-If `cohfactorsd.dat` is present, v0.1 intentionally stops and asks you to use the official plotting path rather than silently ignoring coherence factors.
-
-## Installation
-
-On the cluster:
-
-```bash
-git clone <your-private-repo-url>
-cd edmft_workflow
-python -m pip install -e .
-```
-
-For tests:
-
-```bash
-python -m pip install -e '.[dev]'
-pytest -q
-```
-
-## Configuration
-
-Copy the example:
-
-```bash
-cp config.example.toml config.toml
-vim config.toml
-```
-
-`config.toml` is gitignored. The tracked `examples/mno/config.toml` shows the MnO benchmark values used during development.
-
-For site-specific Intel/MKL/MPI setup, put the real setup in a separate file, for example:
+## Directory layout
 
 ```text
-~/.config/edmft_workflow/env.sh
-```
-
-and set:
-
-```toml
-[environment]
-setup_script = "/home/USER/.config/edmft_workflow/env.sh"
-```
-
-This is preferable to duplicating compiler/MPI environment code into every PBS script.
-
-## First commands
-
-Check that the main DMFT directory looks usable:
-
-```bash
-edmft-workflow -c config.toml doctor
-```
-
-Check convergence:
-
-```bash
-edmft-workflow -c config.toml check
-```
-
-Typical output:
-
-```text
-DMFT convergence: PASS
-last outer cycle       : 15
-last charge iteration  : 7
-mu                     : 6.531263000 eV
-n_latt                 : 5.031487000
-n_imp                  : 5.030921000
-|n_latt-n_imp|         : 0.000566000
-```
-
-The `max_dn` threshold in the config is a workflow sanity criterion, not a universal physics threshold.
-
-## Run the whole post-processing chain in the current shell/job
-
-```bash
-edmft-workflow -c config.toml run all --force
-```
-
-This performs:
-
-```text
-maxent -> DOS -> band -> plots
-```
-
-For debugging, run stages separately:
-
-```bash
-edmft-workflow -c config.toml run maxent --force
-edmft-workflow -c config.toml run dos --force
-edmft-workflow -c config.toml run band --force
-```
-
-`--force` never deletes an existing stage directory directly. It renames it to a timestamped backup first.
-
-## PBS/Torque
-
-Write but do not submit a PBS script:
-
-```bash
-edmft-workflow -c config.toml pbs maxent
-edmft-workflow -c config.toml pbs dos
-edmft-workflow -c config.toml pbs band
-```
-
-Submit one stage:
-
-```bash
-edmft-workflow -c config.toml submit maxent --force
-```
-
-Submit the full chain with `afterok` dependencies:
-
-```bash
-edmft-workflow -c config.toml submit all --force
-```
-
-Conceptually:
-
-```text
-maxent_job --afterok--> dos_job --afterok--> band_job
-```
-
-## Directory layout produced by the workflow
-
-```text
-<work_root>/
-├── maxent/
-│   ├── Sig.average
+PROJECT/
+├── config.toml
+├── inputs/
+│   ├── params.dat
 │   ├── maxent_params.dat
-│   ├── Sig.out
-│   ├── saverage.log
-│   └── maxent.log
-├── onreal/
-│   ├── sig.inp              # real-axis Sigma(w)
-│   ├── case.indmfl          # matsubara=0
-│   ├── case.vector
-│   ├── case.energy
-│   ├── case.cdos
-│   ├── case.gc1
-│   ├── case.dlt1
-│   └── case.Eimp1
-├── band/
-│   ├── case.klist_band
-│   ├── case.vector
-│   ├── case.energy
-│   ├── eigvals.dat
-│   └── case.outputdmfp
-└── results/
-    ├── sigma_matsubara.png/.pdf
-    ├── sigma_realaxis.png/.pdf
-    ├── dos_total.png/.pdf
-    ├── spectral_local.png/.pdf
-    ├── hybridization.png/.pdf
-    ├── Akw.png/.pdf
-    └── akw_data.npz
+│   └── CASE.klist_band
+├── dft/
+└── dmft/
+    ├── maxent/
+    ├── onreal/
+    ├── band/
+    └── analysis/
 ```
 
-## MaxEnt behavior
-
-The workflow:
-
-1. identifies `sig.inp.<outer>.<impurity>` files numerically;
-2. takes only the last `maxent.average_last` files;
-3. verifies identical Matsubara grids;
-4. creates `maxent_params.dat`;
-5. runs `saverage.py` with an explicit file list;
-6. runs `maxent_run.py Sig.average`;
-7. refuses to continue unless `Sig.out` exists and is non-empty.
-
-The default MaxEnt parameter values reproduce the parameter set used in the MnO tutorial-style workflow, but they are all configurable.
-
-## DOS behavior
-
-The DOS stage creates a clean `onreal/` directory and performs:
+The two scientific initializers remain manual:
 
 ```text
-dmft_copy.py <converged DMFT dir>
-cp maxent/Sig.out sig.inp
-patch case.indmfl: matsubara=0, DOS real-frequency window
-x lapw0 -f case
+PROJECT/dft : init_lapw
+PROJECT/dft : init_dmft.py     # after DFT convergence
+```
+
+## Zero-interference policy
+
+`prepare-*`, `doctor`, `check`, `status`, and `analyze` do not source Intel `compilervars.sh`, rewrite the user's shell, edit `.bashrc`, or install aliases. Lightweight upstream helpers such as `dmft_copy.py`, `szero.py`, and `saverage.py` are invoked with explicit paths in child processes.
+
+Numerical execution owns its environment locally:
+
+```text
+PBS DFT/DMFT/MaxEnt
+    → runtime exists only inside run_*.pbs
+
+run dos / run band
+    → runtime exists only inside a child bash process
+    → exits cleanly when postprocessing finishes
+```
+
+## DFT
+
+```bash
+python ~/apps/edmft_workflow/workflow.py -c config.toml init-layout
+
+cd dft
+init_lapw
+```
+
+Generate the DFT PBS:
+
+```bash
+python ~/apps/edmft_workflow/workflow.py -c config.toml pbs dft
+cat dft/run_dft.pbs
+qsub dft/run_dft.pbs
+```
+
+After convergence:
+
+```bash
+cd dft
+init_dmft.py
+```
+
+## DMFT
+
+```bash
+python ~/apps/edmft_workflow/workflow.py -c config.toml prepare-dmft
+python ~/apps/edmft_workflow/workflow.py -c config.toml doctor dmft
+python ~/apps/edmft_workflow/workflow.py -c config.toml pbs dmft
+cat dmft/run_dmft.pbs
+qsub dmft/run_dmft.pbs
+```
+
+The DMFT PBS uses the native Intel MPI stack and writes `mpi_prefix.dat` from the actual `$PBS_NODEFILE` allocation before running `run_dmft.py`.
+
+## MaxEnt analytic continuation
+
+Prepare:
+
+```bash
+python ~/apps/edmft_workflow/workflow.py -c config.toml prepare-maxent
+```
+
+The preparation follows:
+
+```text
+last N sig.inp.*.<impurity>
+        ↓
+saverage.py
+        ↓
+sig.inpx
+        +
+maxent_params.dat
+```
+
+Inspect:
+
+```bash
+head dmft/maxent/sig.inpx
+cat dmft/maxent/maxent_params.dat
+python ~/apps/edmft_workflow/workflow.py -c config.toml doctor maxent
+```
+
+Generate the PBS:
+
+```bash
+python ~/apps/edmft_workflow/workflow.py -c config.toml pbs maxent
+cat dmft/maxent/run_maxent.pbs
+qsub dmft/maxent/run_maxent.pbs
+```
+
+### MaxEnt MPI rule
+
+The validated cluster setup has `mpi4py` built against **Open MPI**, while native WIEN2k/eDMFT uses Intel MPI. Therefore MaxEnt must not be launched with Intel `mpirun`.
+
+The generated MaxEnt PBS mirrors the validated command:
+
+```bash
+ENV=/home/USER/miniforge3/envs/edmft
+MPI="$ENV/bin/mpirun"
+NP=$(wc -l < "$PBS_NODEFILE")
+
+echo "$MPI -np $NP" > mpi_prefix.dat
+
+"$MPI" -np "$NP" \
+    "$ENV/bin/python" \
+    "$WIEN_DMFT_ROOT/maxent_run.py" \
+    sig.inpx > sig1.out 2>&1
+```
+
+The Intel compiler/MKL environment is still loaded because the installed eDMFT/Fortran extensions may need it, but the MaxEnt MPI launcher itself is explicitly the Open MPI launcher next to the configured Python environment.
+
+Current `maxent_run.py` distributes work over active baths/channels. If the input reports `nb=2`, more than two MPI ranks generally do not provide useful bath-level parallelism. The workflow reports the active channel count after `prepare-maxent` so the requested PBS size can be chosen explicitly.
+
+The required output is:
+
+```text
+dmft/maxent/Sig.out
+```
+
+## Real-axis DOS: foreground MPI
+
+After `Sig.out` exists:
+
+```bash
+python ~/apps/edmft_workflow/workflow.py -c config.toml prepare-dos
+python ~/apps/edmft_workflow/workflow.py -c config.toml doctor dos
+```
+
+`prepare-dos` copies the converged DMFT state into `dmft/onreal/`, copies `Sig.out -> sig.inp`, preserves `CASE.indmfl.matsubara`, and changes only the copied `CASE.indmfl` from Matsubara flag `1` to real-axis flag `0`.
+
+Then run directly in foreground MPI:
+
+```bash
+python ~/apps/edmft_workflow/workflow.py -c config.toml run dos
+```
+
+The child shell writes `mpi_prefix.dat` using `[foreground].dos_np` and executes:
+
+```text
+x_lapw -f CASE lapw0
 x_dmft.py lapw1
 x_dmft.py dmft1
 ```
 
-It then requires:
+Logs are streamed to the terminal and saved as `lapw0.log`, `lapw1.log`, and `dmft1.log`.
 
-```text
-case.vector != 0 bytes
-case.energy != 0 bytes
-DMFT1 END
-case.cdos
-case.gc1
-case.dlt1
-case.Eimp1
+## Band / A(k,w): foreground MPI
+
+Prepare:
+
+```bash
+python ~/apps/edmft_workflow/workflow.py -c config.toml prepare-band
+python ~/apps/edmft_workflow/workflow.py -c config.toml doctor band
 ```
 
-This catches the common empty-`case.vector` failure before the Fortran `unit 9` error appears.
+Then:
 
-## Band behavior
+```bash
+python ~/apps/edmft_workflow/workflow.py -c config.toml run band
+```
 
-The band stage creates a clean `band/` directory and performs:
+The child shell writes `mpi_prefix.dat` using `[foreground].band_np` and executes:
 
 ```text
-dmft_copy.py <onreal dir>
-copy Sig.out -> sig.inp
-copy/customize case.klist_band
-patch case.indmfl: matsubara=0, band real-frequency window
 x_dmft.py lapw1 --band
 x_dmft.py dmftp
 ```
 
-The important guardrails are:
+The main output is `dmft/band/eigvals.dat`.
 
-- `lapw1.def` must reference `case.klist_band`;
-- newly generated `case.vector` and `case.energy` must be non-empty;
-- the maximum `Finished k-point number` in the captured `dmftp` output must equal the number of k points in `case.klist_band` when that marker is available;
-- `numkpt` and `tot-k` in `case.outputdmfp` must agree with the k-path when present;
-- the number of k-point blocks in `eigvals.dat` must equal the k-path length.
+## Foreground MPI configuration
 
-This is specifically designed to catch a dangerous failure mode where a 111-point `klist_band` is accidentally combined with an old 20-point IBZ `vector/energy` set.
-
-## k-paths
-
-For the WIEN2k FCC template:
+Example:
 
 ```toml
-[band]
-klist_source = "@wien:fcc.klist"
+[foreground]
+dos_np = 8
+band_np = 8
 ```
 
-which expands to:
+These ranks use the native MPI launcher configured under `[parallel]`, normally Intel MPI for WIEN2k/eDMFT.
 
-```text
-$WIENROOT/SRC_templates/fcc.klist
+## Core commands
+
+```bash
+python ~/apps/edmft_workflow/workflow.py -c config.toml doctor env
+python ~/apps/edmft_workflow/workflow.py -c config.toml doctor dft
+python ~/apps/edmft_workflow/workflow.py -c config.toml doctor dmft
+python ~/apps/edmft_workflow/workflow.py -c config.toml doctor maxent
+python ~/apps/edmft_workflow/workflow.py -c config.toml doctor dos
+python ~/apps/edmft_workflow/workflow.py -c config.toml doctor band
+python ~/apps/edmft_workflow/workflow.py -c config.toml status
+python ~/apps/edmft_workflow/workflow.py -c config.toml analyze all
 ```
 
-For a custom path:
+## Safety invariants
 
-```toml
-[band]
-klist_source = "/absolute/path/to/my.klist_band"
-```
+- workflow never calls `qsub`;
+- workflow never modifies persistent shell configuration;
+- preparation never mutates the upstream calculation directory;
+- real-axis `indmfl` changes are made only in copied DOS/band directories;
+- DFT/DMFT/MaxEnt PBS files are standalone and do not import this workflow at runtime;
+- DOS/band foreground MPI runs happen in disposable child shells;
+- MaxEnt uses the MPI implementation matching its `mpi4py` environment;
+- native WIEN2k/eDMFT stages keep their native Intel MPI runtime;
+- `--force` backs up existing non-empty prepared stage directories before recreating them.
 
-The workflow does not invent a crystallographic path; it copies exactly the k-list you provide.
+## Upstream
 
-## Plotting philosophy
-
-Each physical quantity is written as a separate figure, not subplots:
-
-- total/projected DOS;
-- local orbital spectral function `-Im G / pi`;
-- hybridization `-Im Delta`;
-- Matsubara self-energy;
-- real-axis self-energy;
-- band spectral function `A(k,w)`.
-
-This keeps publication/slide post-processing simple.
-
-## Important limitations in v0.1
-
-- The automated `A(k,w)` plotter assumes no `cohfactorsd.dat`. If coherence factors are present it stops rather than giving a misleading plot.
-- The self-energy selector currently targets one impurity index (`maxent.impurity`, default `1`). Multi-impurity continuation can be added next.
-- Spin-polarized/SOC-specific filename combinations are not yet abstracted. The workflow preserves files created by `dmft_copy.py`, but v0.1 is primarily validated against the paramagnetic MnO-style route.
-- `run_dmft.py` itself is not yet launched by this project. v0.1 starts after the main DFT+DMFT run has finished.
-
-## Upstream references
-
-This project wraps/validates the file conventions used by Kristjan Haule's eDMFT project:
-
-- https://github.com/ru-ccmt/eDMFT
-- `src/python/x_dmft.py`
-- `src/python/wakplot.py`
-- `src/putils/akplt/cakw.cc`
-
-It is an independent workflow/automation layer, not a fork of eDMFT.
+This project is an independent workflow layer around Kristjan Haule's eDMFT project and WIEN2k.
