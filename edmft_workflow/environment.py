@@ -8,7 +8,6 @@ from .utils import WorkflowError, shell_preamble
 
 
 def _wrapped_script(cfg, body: str) -> str:
-    # Use the exact same runtime setup as numerical stages/PBS generation.
     cwd = Path.cwd().resolve()
     scratch = cwd / ".edmft_workflow_preflight_tmp"
     return shell_preamble(cfg, cwd, scratch=scratch) + "\n" + body
@@ -24,39 +23,61 @@ def _run_shell(cfg, body: str) -> tuple[int, str]:
     return cp.returncode, text
 
 
+def _site_shared_libraries(cfg) -> list[str]:
+    if not cfg.site:
+        return []
+    checks = cfg.site.get("checks", {})
+    if not isinstance(checks, dict):
+        return []
+    libs = checks.get("shared_libraries", [])
+    if isinstance(libs, str):
+        return [libs]
+    return [str(x) for x in libs]
+
+
 def environment_report(cfg) -> list[tuple[str, bool, str]]:
-    """Validate the MPI/MKL/Python runtime shared by foreground and PBS jobs."""
+    """Validate the machine profile used by foreground and generated PBS jobs."""
     checks: list[tuple[str, bool, str]] = []
 
-    intel_root = cfg.get("environment.intel_root")
-    if intel_root:
-        p = Path(str(intel_root)).expanduser()
-        cv = p / "linux/bin/compilervars.sh"
-        checks.append(("environment.intel_root", p.is_dir(), str(p)))
-        checks.append(("Intel compilervars", cv.is_file(), str(cv)))
+    if cfg.site_source:
+        checks.append(("site profile", True, str(cfg.site_source)))
+    else:
+        checks.append(("site profile", True, "not loaded; using legacy config sections"))
 
-    setup = cfg.get("environment.setup_script")
-    if setup:
-        p = Path(str(setup)).expanduser()
-        checks.append(("environment.setup_script", p.is_file(), str(p)))
-
-    commands = [
-        ("WIENROOT", 'test -n "$WIENROOT" && test -d "$WIENROOT" && printf "%s" "$WIENROOT"'),
-        ("WIEN_DMFT_ROOT", 'test -n "$WIEN_DMFT_ROOT" && test -d "$WIEN_DMFT_ROOT" && printf "%s" "$WIEN_DMFT_ROOT"'),
-        ("mpirun", 'command -v mpirun'),
-        ("MPI version", 'mpirun -V 2>&1 | head -n 2'),
-    ]
-    for name, cmd in commands:
-        rc, text = _run_shell(cfg, cmd)
-        checks.append((name, rc == 0, text or "not found"))
+    for key, label in (
+        ("environment.wienroot", "WIENROOT directory"),
+        ("environment.edmft_root", "eDMFT directory"),
+    ):
+        raw = cfg.get(key)
+        if raw:
+            p = Path(str(raw)).expanduser()
+            checks.append((label, p.is_dir(), str(p)))
+        else:
+            checks.append((label, False, f"missing machine setting: {key}"))
 
     py = str(cfg.get("environment.python", "python"))
+    py_path = Path(py).expanduser()
+    py_ok = py_path.is_file() if py_path.is_absolute() else True
+    checks.append(("Python", py_ok, py))
+
+    rc, text = _run_shell(cfg, "true")
+    checks.append(("runtime setup", rc == 0, text or "setup commands completed"))
+
+    mpi = str(cfg.get("parallel.mpi_launcher", "mpirun"))
+    rc, text = _run_shell(cfg, f"{shlex.quote(mpi)} -V 2>&1 | head -n 2")
+    checks.append(("native MPI", rc == 0, text or mpi))
+
     pyq = shlex.quote(py)
     rc, text = _run_shell(
         cfg,
         f"{pyq} -c 'from mpi4py import MPI; print(MPI.Get_library_version().strip())'",
     )
     checks.append(("mpi4py", rc == 0, text or "import failed"))
+
+    maxent_mpi = cfg.get("maxent.mpi_launcher")
+    if maxent_mpi:
+        rc, text = _run_shell(cfg, f"{shlex.quote(str(maxent_mpi))} --version 2>&1 | head -n 2")
+        checks.append(("MaxEnt MPI", rc == 0, text or str(maxent_mpi)))
 
     root = cfg.get("environment.edmft_root")
     if root:
@@ -71,20 +92,24 @@ def environment_report(cfg) -> list[tuple[str, bool, str]]:
             detail = "; ".join(missing) if missing else "all shared libraries resolved"
             checks.append((f"ldd {exe}", ok, detail))
 
-    rc, text = _run_shell(
-        cfg,
-        f"{pyq} - <<'PY'\n"
-        "import ctypes\n"
-        "libs=['libmkl_intel_lp64.so','libmkl_intel_thread.so','libmkl_core.so']\n"
-        "bad=[]\n"
-        "for lib in libs:\n"
-        "    try: ctypes.CDLL(lib)\n"
-        "    except OSError as e: bad.append(f'{lib}: {e}')\n"
-        "print('OK' if not bad else '\\n'.join(bad))\n"
-        "raise SystemExit(0 if not bad else 1)\n"
-        "PY",
-    )
-    checks.append(("Intel MKL runtime", rc == 0, text or "MKL load test failed"))
+    libraries = _site_shared_libraries(cfg)
+    if libraries:
+        payload = repr(libraries)
+        rc, text = _run_shell(
+            cfg,
+            f"{pyq} - <<'PY'\n"
+            "import ctypes\n"
+            f"libs={payload}\n"
+            "bad=[]\n"
+            "for lib in libs:\n"
+            "    try: ctypes.CDLL(lib)\n"
+            "    except OSError as e: bad.append(f'{lib}: {e}')\n"
+            "print('OK' if not bad else '\\n'.join(bad))\n"
+            "raise SystemExit(0 if not bad else 1)\n"
+            "PY",
+        )
+        checks.append(("runtime libraries", rc == 0, text or "library load test failed"))
+
     return checks
 
 
@@ -99,4 +124,4 @@ def print_environment_report(cfg) -> bool:
 
 def require_environment(cfg) -> None:
     if not print_environment_report(cfg):
-        raise WorkflowError("Runtime environment preflight failed; fix MPI/MKL/Python setup before submitting compute jobs.")
+        raise WorkflowError("Runtime environment preflight failed; fix site.toml before submitting compute jobs.")
