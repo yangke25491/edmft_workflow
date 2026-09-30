@@ -33,8 +33,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "--site",
         default=None,
         help=(
-            "Machine/site profile. Default: EDMFT_WORKFLOW_SITE if set, otherwise site.toml next to config.toml. "
-            "Legacy configs with embedded environment sections remain readable when no site profile is present."
+            "Explicit machine/site profile. Default: site.toml in the workflow repository root. "
+            "Use --site /path/to/site.toml to select another profile."
         ),
     )
     sub = p.add_subparsers(dest="command", required=True)
