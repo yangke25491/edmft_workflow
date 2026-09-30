@@ -1,6 +1,5 @@
-# MnO site example. Copy this file into the MnO calculation root before use.
-# Project paths are relative to the location of config.toml.
-# Replace placeholder environment and scheduler values for your own site.
+# MnO calculation example. Copy this file into the calculation root before use.
+# Machine paths/MPI/scheduler behavior belong in site.toml; see ../../site.example.toml.
 
 [project]
 case = "01"
@@ -8,52 +7,20 @@ root_dir = "."
 scratch_dir = "dft/tmp"
 dmft_scratch_dir = "dmft/tmp"
 
-[environment]
-wienroot = "/home/USER/apps/edmft/wien2k"
-edmft_root = "/home/USER/apps/edmft/eDMFT/bin"
-python = "/home/USER/miniforge3/envs/edmft/bin/python"
-python_bin_dir = "/home/USER/miniforge3/envs/edmft/bin"
-intel_root = "/path/to/intel"
-intel_arch = "intel64"
-fftw_lib = "/path/to/fftw/lib"
-ulimit_stack = "unlimited"
-ulimit_core = "unlimited"
-
-[environment_extra]
-OMP_NUM_THREADS = "1"
-MKL_NUM_THREADS = "1"
-I_MPI_HYDRA_BOOTSTRAP = "ssh"
-I_MPI_FABRICS = "shm"
-
-[parallel]
-mpi_launcher = "/path/to/mpirun"
-mpi_np_flag = "-np"
-mpi_extra_args = []
-write_mpi_prefix2 = true
-foreground_ranks = 1
-dft_ranks = "allocation"
-dmft_ranks = "allocation"
-maxent_ranks = "allocation"
-dos_ranks = "allocation"
-band_ranks = "allocation"
-wien_machines_mode = "single_node_compact"
-dmft_wien_machines = false
-
 [commands]
-dmft_copy = "dmft_copy.py"
-szero = "szero.py"
-saverage = "saverage.py"
-maxent = "maxent_run.py"
-x_dmft = "x_dmft.py"
-wien_x = "x"
+# Optional helper-command overrides. Leave unset to use the absolute software
+# paths from site.toml.
+# dmft_copy = "dmft_copy.py"
+# szero = "szero.py"
+# saverage = "saverage.py"
 
 [dft]
 run_command = "run_lapw -p -cc 0.0001 -ec 0.0001 -i 100"
 
 [dmft]
-# Omit run_command to let workflow use environment.python + edmft_root/run_dmft.py.
+# Optional frequently tuned full command override.
+# run_command = "python run_dmft.py"
 
-# Fill these from the already validated MnO params.dat before prepare-dmft.
 [dmft_params]
 solver = "CTQMC"
 DCs = "nominal"
@@ -61,12 +28,13 @@ max_dmft_iterations = 1
 max_lda_iterations = 100
 
 [impurity0]
+# Prefer inputs/params.dat. Fill only when using generated fallback.
 # exe = "ctqmc"
-# U = ...
-# J = ...
-# beta = ...
-# nf0 = ...
-# M = ...
+# U = 8.0
+# J = 0.8
+# beta = 100.0
+# nf0 = 5.0
+# M = 5000000
 
 [dmft_prepare]
 initial_sigma = "szero"
@@ -77,27 +45,17 @@ max_dn = 0.005
 outer_drift = 0.005
 block_postprocess = true
 
-[maxent]
+[fermi]
+tolerance_eV = 1e-6
+
+[post]
 impurity = 1
 average_last = 5
 
-[maxent_params]
-statistics = "fermi"
-Ntau = 300
-L = 20.0
-x0 = 0.005
-bwdth = 0.004
-Nw = 300
-gwidth = 30.0
-idg = 1
-deltag = 0.004
-Asteps = 4000
-alpha0 = 1000
-min_ratio = 0.001
-iflat = 1
-Nitt = 1000
-Nr = 0
-Nf = 40
+[maxent]
+# MPI/runtime belongs to site.toml [mpi.maxent] / [runtime.maxent].
+# Optional full-command override:
+# run_command = "mpirun -np 2 python /path/to/maxent_run.py sig.inpx"
 
 [dos]
 nomega = 200
@@ -110,7 +68,15 @@ wmin = -6.0
 wmax = 6.0
 klist_source = "@wien:fcc.klist"
 
+[foreground]
+dos_np = 8
+band_np = 8
+
+[analysis]
+z_fit_points = 4
+
 [plot]
+format = "both"
 orbital_labels = ["eg", "t2g"]
 cdos_labels = ["Total DOS", "Mn-d"]
 dos_xmin = -3.0
@@ -118,40 +84,28 @@ dos_xmax = 1.0
 akw_intensity = 0.97
 drop_klabels = ["LAMBDA", "DELTA", "Z"]
 
-# Scheduler values below are minimal placeholders; tune them for your site.
+# Requested resources stay with the calculation. Scheduler syntax and resource
+# interpretation are supplied by site.toml.
 [pbs]
-qsub = "qsub"
 queue = "batch"
 nodes = 1
 ppn = 1
 walltime = "04:00:00"
 
 [pbs_dft]
-job_name = "MnO"
-ppn = 1
-walltime = "04:00:00"
+job_name = "MnO_DFT"
+ppn = 64
+walltime = "168:00:00"
 mem = ""
 
 [pbs_dmft]
-job_name = "MnO"
-ppn = 1
-walltime = "04:00:00"
+job_name = "MnO_DMFT"
+ppn = 32
+walltime = "168:00:00"
 mem = ""
 
 [pbs_maxent]
 job_name = "MnO_MaxEnt"
-ppn = 1
+ppn = 2
+walltime = "24:00:00"
 mem = ""
-walltime = "04:00:00"
-
-[pbs_dos]
-job_name = "MnO_DOS"
-ppn = 1
-mem = ""
-walltime = "04:00:00"
-
-[pbs_band]
-job_name = "MnO_BAND"
-ppn = 1
-mem = ""
-walltime = "04:00:00"
