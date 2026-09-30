@@ -130,7 +130,6 @@ def assert_log_contains(path: Path, marker: str) -> None:
 
 
 def copy_case_files(source: Path, target: Path, case: str, suffixes: Sequence[str], required: bool = True) -> None:
-    """Copy named WIEN2k case files explicitly."""
     target.mkdir(parents=True, exist_ok=True)
     for suffix in suffixes:
         src = source / f"{case}.{suffix}"
@@ -146,13 +145,7 @@ def copy_case_files(source: Path, target: Path, case: str, suffixes: Sequence[st
 
 
 def edmft_helper_command(cfg, name: str) -> list[str]:
-    """Resolve a lightweight upstream helper to an explicit command.
-
-    Preparation helpers deliberately do not depend on PATH activation. By
-    default they use the configured Python interpreter plus the absolute eDMFT
-    script path. A commands.<name> override remains available for unusual local
-    installations.
-    """
+    """Resolve a lightweight upstream helper to an explicit command."""
     key = name.replace(".py", "").replace("-", "_")
     configured = cfg.get(f"commands.{key}")
     if configured:
@@ -170,20 +163,14 @@ def edmft_helper_command(cfg, name: str) -> list[str]:
     root = cfg.get("environment.edmft_root")
     if not python or not root:
         raise WorkflowError(
-            f"environment.python and environment.edmft_root are required to run {name}"
+            f"software.python and software.edmft_root are required in site.toml to run {name}"
         )
     script = Path(str(root)) / name
     return [str(python), str(script)]
 
 
 def build_helper_env(cfg, scratch: Path | None = None) -> dict[str, str]:
-    """Return only process-local variables needed by lightweight eDMFT helpers.
-
-    No Intel/MKL/MPI setup, PATH rewrite, LD_LIBRARY_PATH rewrite, PYTHONPATH
-    rewrite, or environment_extra values are injected here. ``run`` merges
-    these overrides into a copy of the current process environment, so the
-    caller's login shell is never modified.
-    """
+    """Return only process-local variables needed by lightweight eDMFT helpers."""
     env: dict[str, str] = {}
     wienroot = cfg.get("environment.wienroot")
     edmft_root = cfg.get("environment.edmft_root")
@@ -207,7 +194,6 @@ def run_edmft_helper(
     check: bool = True,
     scratch: Path | None = None,
 ):
-    """Run a small official eDMFT helper with minimal child-only environment."""
     cmd = [*edmft_helper_command(cfg, name), *[str(x) for x in (args or [])]]
     return run(
         cmd,
@@ -232,8 +218,16 @@ def _python_env_root(cfg) -> Path | None:
     return None
 
 
+def _list_value(value) -> list[str]:
+    if value in (None, ""):
+        return []
+    if isinstance(value, str):
+        return [value]
+    return [str(x) for x in value]
+
+
 def build_runtime_env(cfg, cwd: Path, scratch: Path | None = None) -> dict[str, str]:
-    """Build the full heavy-job environment for legacy foreground runners."""
+    """Build the full heavy-job environment without touching the login shell."""
     effective_scratch = (scratch or cwd).resolve()
     effective_scratch.mkdir(parents=True, exist_ok=True)
     env: dict[str, str] = {"SCRATCH": str(effective_scratch)}
@@ -244,9 +238,16 @@ def build_runtime_env(cfg, cwd: Path, scratch: Path | None = None) -> dict[str, 
         env["WIEN_DMFT_ROOT"] = str(edmft_root)
     if wienroot:
         env["WIENROOT"] = str(wienroot)
-    path_parts = [str(x) for x in (edmft_root, wienroot, python_dir) if x]
+
+    path_parts = _list_value(cfg.get("environment.prepend_path", []))
+    path_parts += [str(x) for x in (edmft_root, wienroot, python_dir) if x]
     if path_parts:
         env["PATH"] = ":".join(path_parts + [os.environ.get("PATH", "")])
+
+    ld_parts = _list_value(cfg.get("environment.prepend_ld_library_path", []))
+    if ld_parts:
+        env["LD_LIBRARY_PATH"] = ":".join(ld_parts + [os.environ.get("LD_LIBRARY_PATH", "")])
+
     if edmft_root:
         env["PYTHONPATH"] = str(edmft_root) + (
             ":" + os.environ.get("PYTHONPATH", "") if os.environ.get("PYTHONPATH") else ""
@@ -256,13 +257,13 @@ def build_runtime_env(cfg, cwd: Path, scratch: Path | None = None) -> dict[str, 
     return env
 
 
-def shell_preamble(cfg, cwd: Path, scratch: Path | None = None) -> str:
-    """Render the complete runtime setup for standalone heavy jobs.
+def shell_preamble(cfg, cwd: Path, scratch: Path | None = None, profile: str = "native") -> str:
+    """Render a standalone child-shell runtime from site.toml.
 
-    This is intentionally used by generated PBS scripts (and retained legacy
-    foreground numerical runners), not by prepare-* helpers. The generated
-    shell reproduces the validated Intel/MKL/MPI/WIEN2k/eDMFT runtime while the
-    user's current login shell remains untouched.
+    New site profiles should use runtime.setup_commands, runtime.prepend_path,
+    runtime.prepend_ld_library_path and runtime.env.  The historical
+    runtime.intel_root/setup_script keys remain supported for old installations.
+    ``profile='maxent'`` layers runtime.maxent.* on top of the common runtime.
     """
     effective_scratch = (scratch or cwd).resolve()
     lines = ["set -e", f"cd {shlex.quote(str(cwd))}"]
@@ -270,6 +271,7 @@ def shell_preamble(cfg, cwd: Path, scratch: Path | None = None) -> str:
     setup = cfg.get("environment.setup_script")
     if setup:
         lines.append(f"source {shlex.quote(str(setup))}")
+    lines.extend(_list_value(cfg.get("environment.setup_commands", [])))
 
     intel_root = cfg.get("environment.intel_root")
     intel_arch = str(cfg.get("environment.intel_arch", "intel64"))
@@ -277,6 +279,9 @@ def shell_preamble(cfg, cwd: Path, scratch: Path | None = None) -> str:
         intel = Path(str(intel_root)).expanduser()
         lines.append(f"INTEL={shlex.quote(str(intel))}")
         lines.append(f"source \"$INTEL/linux/bin/compilervars.sh\" {shlex.quote(intel_arch)}")
+
+    if profile == "maxent":
+        lines.extend(_list_value(cfg.get("maxent_runtime.setup_commands", [])))
 
     wienroot = cfg.get("environment.wienroot")
     edmft_root = cfg.get("environment.edmft_root")
@@ -289,37 +294,36 @@ def shell_preamble(cfg, cwd: Path, scratch: Path | None = None) -> str:
     if edmft_root:
         lines.append(f"export WIEN_DMFT_ROOT={shlex.quote(str(edmft_root))}")
 
+    path_parts = _list_value(cfg.get("environment.prepend_path", []))
+    if profile == "maxent":
+        path_parts += _list_value(cfg.get("maxent_runtime.prepend_path", []))
+    path_parts += [str(x) for x in (edmft_root, wienroot, pybin) if x]
+
+    # Legacy Intel layout fallback. New installations should place these paths
+    # explicitly in runtime.prepend_path / runtime.prepend_ld_library_path.
     if intel_root:
         intel = Path(str(intel_root)).expanduser()
-        path_parts = [
-            edmft_root,
-            wienroot,
-            str(intel / "linux/mpi/intel64/bin"),
-            str(intel / "linux/bin/intel64"),
-            pybin,
-            "/usr/bin",
-            "/bin",
-        ]
-        path_text = ":".join(str(x) for x in path_parts if x)
-        lines.append(f"export PATH={shlex.quote(path_text)}")
+        path_parts += [str(intel / "linux/mpi/intel64/bin"), str(intel / "linux/bin/intel64")]
+    if path_parts:
+        lines.append(f"export PATH={shlex.quote(':'.join(path_parts))}:$PATH")
 
-        ld_parts = [
+    ld_parts = _list_value(cfg.get("environment.prepend_ld_library_path", []))
+    if profile == "maxent":
+        ld_parts += _list_value(cfg.get("maxent_runtime.prepend_ld_library_path", []))
+    if intel_root:
+        intel = Path(str(intel_root)).expanduser()
+        ld_parts += [
             str(intel / "linux/mkl/lib/intel64"),
             str(intel / "linux/compiler/lib/intel64_lin"),
             str(intel / "linux/mpi/intel64/lib/release"),
             str(intel / "linux/mpi/intel64/lib"),
         ]
-        if fftw_lib:
-            ld_parts.append(str(fftw_lib))
-        if pyenv:
-            ld_parts.append(str(pyenv / "lib"))
-        ld_text = ":".join(ld_parts)
-        lines.append(f"export LD_LIBRARY_PATH={shlex.quote(ld_text)}:${{LD_LIBRARY_PATH:-}}")
-    else:
-        path_parts = [p for p in (edmft_root, wienroot, pybin) if p]
-        if path_parts:
-            joined = ":".join(str(p) for p in path_parts)
-            lines.append(f"export PATH={shlex.quote(joined)}:$PATH")
+    if fftw_lib:
+        ld_parts.append(str(fftw_lib))
+    if pyenv:
+        ld_parts.append(str(pyenv / "lib"))
+    if ld_parts:
+        lines.append(f"export LD_LIBRARY_PATH={shlex.quote(':'.join(ld_parts))}:${{LD_LIBRARY_PATH:-}}")
 
     if edmft_root:
         lines.append(
@@ -337,6 +341,10 @@ def shell_preamble(cfg, cwd: Path, scratch: Path | None = None) -> str:
     lines.append(f"export SCRATCH={shlex.quote(str(effective_scratch))}")
 
     extra = cfg.section("environment_extra")
+    if profile == "maxent":
+        profile_env = cfg.get("maxent_runtime.env", {}) or {}
+        if isinstance(profile_env, dict):
+            extra = {**extra, **profile_env}
     if "OMP_NUM_THREADS" not in extra:
         lines.append("export OMP_NUM_THREADS=1")
     if "MKL_NUM_THREADS" not in extra:
@@ -354,12 +362,8 @@ def run_stage(
     check: bool = True,
     scratch: Path | None = None,
 ):
-    """Legacy foreground numerical runner using the full configured runtime."""
+    """Foreground numerical runner using the site-defined native runtime."""
     env = build_runtime_env(cfg, cwd, scratch=scratch)
-    setup = cfg.get("environment.setup_script")
-    intel_root = cfg.get("environment.intel_root")
-    if setup or intel_root:
-        printable = command if isinstance(command, str) else " ".join(shlex.quote(x) for x in command)
-        wrapped = shell_preamble(cfg, cwd, scratch=scratch) + "\n" + printable
-        return run(["bash", "-lc", wrapped], cwd=cwd, env=env, log=log, check=check)
-    return run(command, cwd=cwd, env=env, log=log, check=check)
+    printable = command if isinstance(command, str) else " ".join(shlex.quote(x) for x in command)
+    wrapped = shell_preamble(cfg, cwd, scratch=scratch) + "\n" + printable
+    return run(["bash", "-lc", wrapped], cwd=cwd, env=env, log=log, check=check)
