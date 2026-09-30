@@ -6,13 +6,13 @@ clone can drive many material calculations.
 Recommended layout:
 
 ```text
-/home/kyang/apps/
+/home/USER/apps/
 └── edmft_workflow/              # git clone; software only
     ├── workflow.py
     ├── edmft_workflow/
     └── ...
 
-/home/kyang/test/DMFT/
+/home/USER/test/DMFT/
 ├── MnO/
 │   ├── config.toml              # complete per-calculation configuration
 │   ├── dft/
@@ -38,27 +38,27 @@ the runtime shell setup for foreground subprocesses and PBS jobs.
 Run the git checkout explicitly:
 
 ```bash
-/home/kyang/miniforge3/envs/edmft/bin/python \
-/home/kyang/apps/edmft_workflow/workflow.py \
--c /home/kyang/test/DMFT/MnO/config.toml \
+/home/USER/miniforge3/envs/edmft/bin/python \
+/home/USER/apps/edmft_workflow/workflow.py \
+-c /home/USER/test/DMFT/MnO/config.toml \
 init-layout
 ```
 
 Environment preflight:
 
 ```bash
-/home/kyang/miniforge3/envs/edmft/bin/python \
-/home/kyang/apps/edmft_workflow/workflow.py \
--c /home/kyang/test/DMFT/MnO/config.toml \
+/home/USER/miniforge3/envs/edmft/bin/python \
+/home/USER/apps/edmft_workflow/workflow.py \
+-c /home/USER/test/DMFT/MnO/config.toml \
 doctor-env
 ```
 
 Generate, but do not submit, a PBS script during validation:
 
 ```bash
-/home/kyang/miniforge3/envs/edmft/bin/python \
-/home/kyang/apps/edmft_workflow/workflow.py \
--c /home/kyang/test/DMFT/MnO/config.toml \
+/home/USER/miniforge3/envs/edmft/bin/python \
+/home/USER/apps/edmft_workflow/workflow.py \
+-c /home/USER/test/DMFT/MnO/config.toml \
 pbs dft
 ```
 
@@ -103,7 +103,7 @@ back to the pristine DFT baseline.
 Because it is not installed into site-packages:
 
 ```bash
-cd /home/kyang/apps/edmft_workflow
+cd /home/USER/apps/edmft_workflow
 git pull
 ```
 
