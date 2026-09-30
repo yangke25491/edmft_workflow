@@ -1,12 +1,14 @@
 # Machine/site profile for edmft_workflow.
 #
-# Copy this to site.toml (ignored by git) or keep it elsewhere and pass
+# Default location:
+#   <workflow-repository-root>/site.toml
+# Copy this file there as site.toml (ignored by git), or pass an explicit
+# alternate profile with:
 #   --site /path/to/site.toml
-# You may also set EDMFT_WORKFLOW_SITE=/path/to/site.toml.
 #
-# This file contains machine-specific information only.  Project physics,
+# This file contains machine-specific information only. Project physics,
 # requested cores/memory/walltime and frequently tuned run commands remain in
-# config.toml.
+# each calculation's config.toml.
 
 [software]
 wienroot = "/path/to/wien2k"
@@ -16,7 +18,7 @@ python = "/path/to/python"
 # python_bin_dir = "/path/to/bin"
 
 [runtime]
-# Generic shell setup.  These commands are frozen into generated PBS scripts
+# Generic shell setup. These commands are frozen into generated PBS scripts
 # and foreground child shells; they never modify the user's login shell.
 setup_commands = [
   # "source /path/to/compiler/setup.sh",
@@ -69,7 +71,7 @@ jobid_env = "PBS_JOBID"
 nodefile_env = "PBS_NODEFILE"
 submit_command = "qsub"
 
-# How to obtain the allocated MPI/CPU slot count.  No scheduler brand is
+# How to obtain the allocated MPI/CPU slot count. No scheduler brand is
 # hard-coded in the workflow. Choose one behavior for this machine:
 #   "nodefile" : line count of nodefile_env (one line per allocated slot)
 #   "env"      : first integer found in slot_count_envs
@@ -80,13 +82,13 @@ slot_count_envs = ["PBS_NP", "NCPUS"]
 
 # For a scheduler whose nodefile contains one line per host rather than one
 # line per CPU slot, switch to command mode and provide a command that prints
-# the allocation size.  {jobid} and {nodefile} are replaced by the current job
+# the allocation size. {jobid} and {nodefile} are replaced by the current job
 # id/nodefile without embedding scheduler-specific logic in the Python code.
 # slot_count_source = "command"
 # slot_count_command = "qstat -f {jobid} | awk '/resources_used.ncpus/{print $NF; exit}'"
 
-# Resource request syntax is also a site policy.  Keep the first form on sites
-# accepting nodes/ppn.  A different installation can use, for example, a
+# Resource request syntax is also a site policy. Keep the first form on sites
+# accepting nodes/ppn. A different installation can use, for example, a
 # select/ncpus form without changing workflow code.
 resource_template = "#PBS -l nodes={nodes}:ppn={ppn}"
 # resource_template = "#PBS -l select={nodes}:ncpus={ppn}:mpiprocs={ppn}"
