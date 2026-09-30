@@ -139,7 +139,7 @@ qsub dmft/maxent/run_maxent.pbs
 
 ### MaxEnt MPI rule
 
-The validated cluster setup has `mpi4py` built against **Open MPI**, while native WIEN2k/eDMFT uses Intel MPI. Therefore MaxEnt must not be launched with Intel `mpirun`.
+If `mpi4py` is built against **Open MPI** while native WIEN2k/eDMFT uses Intel MPI, MaxEnt must be launched with the MPI implementation matching `mpi4py` rather than Intel `mpirun`.
 
 The generated MaxEnt PBS mirrors the validated command:
 
