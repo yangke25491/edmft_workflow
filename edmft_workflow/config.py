@@ -41,6 +41,10 @@ def _deep_merge(a: Dict[str, Any], b: Dict[str, Any]) -> Dict[str, Any]:
     for k, v in b.items():
         if isinstance(v, dict) and isinstance(out.get(k), dict):
             out[k] = _deep_merge(out[k], v)
+        elif isinstance(v, dict):
+            out[k] = _deep_merge({}, v)
+        elif isinstance(v, list):
+            out[k] = list(v)
         else:
             out[k] = v
     return out
@@ -55,22 +59,60 @@ def _lookup(data: Dict[str, Any], dotted: str, default: Any = None) -> Any:
     return cur
 
 
+def _assign(data: Dict[str, Any], dotted: str, value: Any) -> None:
+    parts = dotted.split(".")
+    cur = data
+    for part in parts[:-1]:
+        nxt = cur.get(part)
+        if not isinstance(nxt, dict):
+            nxt = {}
+            cur[part] = nxt
+        cur = nxt
+    cur[parts[-1]] = value
+
+
 def _read_toml(path: Path) -> Dict[str, Any]:
     with path.open("rb") as f:
         return tomllib.load(f)
 
 
+def _expand_site_paths(data: Dict[str, Any], base: Path) -> Dict[str, Any]:
+    """Expand only path-valued site keys, leaving shell commands untouched."""
+    out = _deep_merge({}, data)
+    scalar_paths = [
+        "software.wienroot",
+        "software.edmft_root",
+        "software.python",
+        "software.python_bin_dir",
+        "runtime.setup_script",
+        "runtime.intel_root",
+        "runtime.fftw_lib",
+        "mpi.native.launcher",
+        "mpi.maxent.launcher",
+    ]
+    list_paths = [
+        "runtime.prepend_path",
+        "runtime.prepend_ld_library_path",
+        "runtime.maxent.prepend_path",
+        "runtime.maxent.prepend_ld_library_path",
+    ]
+    for dotted in scalar_paths:
+        value = _lookup(out, dotted, _MISSING)
+        if value is not _MISSING:
+            _assign(out, dotted, _expand(value, base))
+    for dotted in list_paths:
+        value = _lookup(out, dotted, _MISSING)
+        if value is _MISSING:
+            continue
+        if isinstance(value, str):
+            value = [value]
+        _assign(out, dotted, [_expand(v, base) for v in value])
+    return out
+
+
 @dataclass(frozen=True)
 class WorkflowConfig:
-    """Project configuration plus an optional machine/site profile.
-
-    ``data`` is the calculation-local config.toml. ``site`` is deliberately
-    separate: it contains software locations, compiler/runtime setup, MPI and
-    scheduler semantics.  Existing modules still use the historical
-    ``environment.*`` / ``parallel.*`` accessors through the compatibility
-    mapping below, so calculation code does not need to know where the machine
-    profile lives.
-    """
+    """Project configuration plus an optional machine/site profile."""
 
     data: Dict[str, Any]
     source: Path
@@ -96,7 +138,7 @@ class WorkflowConfig:
             "environment.python_bin_dir": "software.python_bin_dir",
             "environment.setup_script": "runtime.setup_script",
             "environment.setup_commands": "runtime.setup_commands",
-            "environment.intel_root": "runtime.intel_root",  # legacy-compatible optional key
+            "environment.intel_root": "runtime.intel_root",
             "environment.intel_arch": "runtime.intel_arch",
             "environment.fftw_lib": "runtime.fftw_lib",
             "environment.ulimit_stack": "runtime.ulimit_stack",
@@ -146,9 +188,6 @@ class WorkflowConfig:
         return dict(self.data.get(name, {}))
 
     def get(self, dotted: str, default: Any = None) -> Any:
-        # Machine/runtime keys belong to site.toml whenever a site profile is
-        # active.  This prevents an old config.toml from silently overriding
-        # the selected machine environment.
         machine_key = (
             dotted.startswith("environment.")
             or dotted.startswith("environment_extra.")
@@ -236,7 +275,7 @@ def load_config(path: str | Path, site_path: str | Path | None = None) -> Workfl
     resolved_site = _resolve_site_path(path, site_path)
     site: Dict[str, Any] | None = None
     if resolved_site is not None:
-        site = _deep_expand(_read_toml(resolved_site), resolved_site.parent)
+        site = _expand_site_paths(_read_toml(resolved_site), resolved_site.parent)
 
     cfg = WorkflowConfig(data=data, source=path, site=site, site_source=resolved_site)
     _validate(cfg)
