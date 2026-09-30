@@ -1,19 +1,15 @@
-# Generic project-local configuration.
+# Project-local calculation configuration.
 # Put this file at PROJECT/config.toml.
 # root_dir = "." means the directory containing this config file.
-# Replace placeholder environment and scheduler values for your own site.
+#
+# Machine-specific software paths, MPI/MKL/runtime setup, and scheduler
+# allocation semantics belong in site.toml (see site.example.toml).
 #
 # Scientific native inputs can be kept in PROJECT/inputs/:
 #   inputs/params.dat
 #   inputs/maxent_params.dat
 #   inputs/CASE.klist_band
 # Native files take priority over generated fallbacks.
-#
-# Environment policy:
-# - prepare-* never modifies your login shell and does not source Intel/MKL.
-# - lightweight eDMFT helpers are called through absolute configured paths.
-# - DFT, DMFT, and MaxEnt use standalone PBS scripts.
-# - DOS and band are run in foreground MPI child shells; the parent shell is unchanged.
 
 [project]
 case = "01"
@@ -21,31 +17,15 @@ root_dir = "."
 scratch_dir = "dft/tmp"
 dmft_scratch_dir = "dmft/tmp"
 
-[environment]
-wienroot = "/home/USER/apps/edmft/wien2k"
-edmft_root = "/home/USER/apps/edmft/eDMFT/bin"
-python = "/home/USER/miniforge3/envs/edmft/bin/python"
-python_bin_dir = "/home/USER/miniforge3/envs/edmft/bin"
-intel_root = "/path/to/intel"
-intel_arch = "intel64"
-fftw_lib = "/path/to/fftw/lib"
-ulimit_stack = "unlimited"
-ulimit_core = "unlimited"
-
-[environment_extra]
-I_MPI_HYDRA_BOOTSTRAP = "ssh"
-I_MPI_FABRICS = "shm"
-
-[parallel]
-# Native WIEN2k/eDMFT MPI stack used by DMFT and foreground DOS/band.
-mpi_launcher = "/path/to/mpirun"
-mpi_np_flag = "-np"
-write_mpi_prefix2 = true
-wien_machines_mode = "single_node_compact"
-dmft_wien_machines = false
-
+# Frequently tuned execution command.  Environment/path resolution comes from
+# site.toml, so this can stay portable between machines.
 [dft]
-run_command = "/home/USER/apps/edmft/wien2k/run_lapw -p -cc 0.0001 -ec 0.0001 -i 100"
+run_command = "run_lapw -p -cc 0.0001 -ec 0.0001 -i 100"
+
+[dmft]
+# Optional full command override.  Leave commented to use site software.python
+# + site software.edmft_root/run_dmft.py.
+# run_command = "python run_dmft.py"
 
 [dmft_params]
 solver = "CTQMC"
@@ -80,12 +60,10 @@ impurity = 1
 average_last = 3
 
 [maxent]
-# Use the MPI launcher that matches the configured mpi4py environment.
-# Override only if needed:
-# mpi_launcher = "/home/USER/miniforge3/envs/edmft/bin/mpirun"
-mpi_np_flag = "-np"
 # prepare-maxent writes dmft/maxent/sig.inpx and maxent_params.dat.
-# MPI scaling is limited by the number of active MaxEnt baths/channels.
+# MPI implementation/path belongs in site.toml [mpi.maxent].
+# Optional full command override (if set, include the launcher yourself):
+# run_command = "mpirun -np 2 python /path/to/maxent_run.py sig.inpx"
 
 [dos]
 nomega = 200
@@ -98,7 +76,8 @@ wmin = -6.0
 wmax = 6.0
 klist_source = "@wien:fcc.klist"
 
-# DOS and band are foreground MPI postprocessing. Adjust ranks for your allocation.
+# DOS and band are foreground MPI postprocessing. These are calculation-level
+# choices and therefore stay in config.toml.
 [foreground]
 dos_np = 1
 band_np = 1
@@ -117,8 +96,8 @@ dos_xmax = 1.0
 akw_intensity = 0.97
 drop_klabels = ["LAMBDA", "DELTA", "Z"]
 
-# PBS is reserved for the heavy stages: DFT, DMFT, MaxEnt.
-# The values below are intentionally minimal placeholders; tune them for your site.
+# PBS resources are calculation choices and remain project-local. Scheduler
+# syntax/semantics are supplied by site.toml.
 [pbs]
 queue = "batch"
 nodes = 1
