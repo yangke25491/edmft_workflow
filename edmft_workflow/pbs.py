@@ -31,76 +31,72 @@ def _stage_dir(cfg, stage: str) -> Path:
 
 def _mpi_launcher(cfg) -> str:
     configured = cfg.get("parallel.mpi_launcher")
-    if configured:
-        return str(configured)
-    intel = cfg.get("environment.intel_root")
-    if intel:
-        return str(Path(str(intel)) / "linux/mpi/intel64/bin/mpirun")
-    return "mpirun"
-
-
-def _python_env_root(cfg) -> Path:
-    python = Path(str(cfg.require("environment.python"))).expanduser()
-    if python.parent.name != "bin":
-        raise WorkflowError(
-            "environment.python must point to .../envs/NAME/bin/python so MaxEnt can locate ENV/bin/mpirun"
-        )
-    return python.parent.parent
+    return str(configured) if configured else "mpirun"
 
 
 def _maxent_mpi_launcher(cfg) -> str:
     configured = cfg.get("maxent.mpi_launcher")
-    if configured:
-        return str(configured)
-    return str(_python_env_root(cfg) / "bin" / "mpirun")
+    return str(configured) if configured else "mpirun"
 
 
-def _maxent_preamble(cfg, cwd: Path, scratch: Path) -> str:
-    """Mirror the cluster MaxEnt environment that has been validated by the user.
+def _shell_slot_command(cfg, template: str) -> str:
+    job_env = str(cfg.get("scheduler.jobid_env", "PBS_JOBID"))
+    node_env = str(cfg.get("scheduler.nodefile_env", "PBS_NODEFILE"))
+    return template.replace("{jobid}", f'"${{{job_env}:-}}"').replace(
+        "{nodefile}", f'"${{{node_env}:-}}"'
+    )
 
-    Intel compiler/MKL runtime is loaded first, the eDMFT conda environment is
-    activated, and MaxEnt itself is launched explicitly with ENV/bin/mpirun so
-    mpi4py uses the Open MPI implementation from that environment.
-    """
-    intel = Path(str(cfg.require("environment.intel_root"))).expanduser()
-    env_root = _python_env_root(cfg).resolve()
-    env_name = env_root.name
-    wienroot = str(cfg.require("environment.wienroot"))
-    edmft_root = str(cfg.require("environment.edmft_root"))
-    fftw = str(cfg.get("environment.fftw_lib", "/opt/fftw-3.3.10/lib"))
-    arch = str(cfg.get("environment.intel_arch", "intel64"))
-    conda_root = env_root.parent.parent if env_root.parent.name == "envs" else env_root.parent
-    conda_sh = conda_root / "etc/profile.d/conda.sh"
 
-    lines = [
-        "set -e",
-        f"cd {shlex.quote(str(cwd))}",
-        f"INTEL={shlex.quote(str(intel))}",
-        f"ENV={shlex.quote(str(env_root))}",
-        f"source \"$INTEL/linux/bin/compilervars.sh\" {shlex.quote(arch)}",
-        f"source {shlex.quote(str(conda_sh))}",
-        f"conda activate {shlex.quote(env_name)}",
-        f"export WIENROOT={shlex.quote(wienroot)}",
-        f"export WIEN_DMFT_ROOT={shlex.quote(edmft_root)}",
-        'export PYTHONPATH="$WIEN_DMFT_ROOT${PYTHONPATH:+:$PYTHONPATH}"',
-        'export LD_LIBRARY_PATH="$INTEL/linux/mkl/lib/intel64:$INTEL/linux/compiler/lib/intel64_lin:$INTEL/linux/mpi/intel64/lib/release:$INTEL/linux/mpi/intel64/lib:'
-        + shlex.quote(fftw)
-        + ':$ENV/lib:${LD_LIBRARY_PATH:-}"',
-        "export OMP_NUM_THREADS=1",
-        "export MKL_NUM_THREADS=1",
-        f"export SCRATCH={shlex.quote(str(scratch))}",
-        'mkdir -p "$SCRATCH"',
+def _pbs_np_snippet(cfg) -> list[str]:
+    """Freeze the site-defined scheduler slot-count policy into the PBS script."""
+    source = str(cfg.get("scheduler.slot_count_source", "nodefile")).lower()
+    node_env = str(cfg.get("scheduler.nodefile_env", "PBS_NODEFILE"))
+    command = cfg.get("scheduler.slot_count_command")
+    envs = cfg.get("scheduler.slot_count_envs", ["PBS_NP", "NCPUS"])
+    if isinstance(envs, str):
+        envs = [envs]
+
+    lines: list[str] = ["NP="]
+    if source in {"env", "auto"}:
+        for name in envs:
+            name = str(name)
+            lines += [
+                f'if [ -z "$NP" ] && [ -n "${{{name}:-}}" ]; then NP="${{{name}}}"; fi'
+            ]
+    if source in {"command", "auto"} and command:
+        cmd = _shell_slot_command(cfg, str(command))
+        lines += [f'if [ -z "$NP" ]; then NP=$({cmd}); fi']
+    if source in {"nodefile", "auto"}:
+        lines += [
+            f'if [ -z "$NP" ] && [ -n "${{{node_env}:-}}" ]; then NP=$(wc -l < "${{{node_env}}}"); fi'
+        ]
+    if source not in {"nodefile", "env", "command", "auto"}:
+        raise WorkflowError(
+            f"Unknown scheduler.slot_count_source={source!r}; use nodefile, env, command, or auto"
+        )
+    lines += [
+        'case "$NP" in',
+        "    ''|*[!0-9]*) echo \"ERROR: site scheduler slot-count policy did not return an integer: '$NP'\" >&2; exit 2 ;;",
+        "esac",
+        'if [ "$NP" -lt 1 ]; then echo "ERROR: allocated slot count must be >=1" >&2; exit 2; fi',
     ]
-    return "\n".join(lines)
+    return lines
 
 
 def _mpi_prefix_lines(cfg) -> list[str]:
     launcher = _mpi_launcher(cfg)
     npflag = str(cfg.get("parallel.mpi_np_flag", "-np"))
+    extra = cfg.get("parallel.mpi_extra_args", [])
+    if isinstance(extra, str):
+        extra = shlex.split(extra)
+    extra_text = " ".join(shlex.quote(str(x)) for x in extra)
+    cmd = f"$MPI {shlex.quote(npflag)} $NP"
+    if extra_text:
+        cmd += " " + extra_text
     lines = [
-        'NP=$(wc -l < "$PBS_NODEFILE")',
+        *_pbs_np_snippet(cfg),
         f"MPI={shlex.quote(launcher)}",
-        f"echo \"$MPI {npflag} $NP\" > mpi_prefix.dat",
+        f'echo "{cmd}" > mpi_prefix.dat',
     ]
     if bool(cfg.get("parallel.write_mpi_prefix2", True)):
         lines.append("cp mpi_prefix.dat mpi_prefix.dat2")
@@ -119,14 +115,17 @@ def _native_commands(cfg, stage: str) -> list[str]:
     python = str(cfg.get("environment.python", "python"))
 
     if stage == "dft":
-        cmd = cfg.get("dft.run_command")
-        if cmd:
-            run = str(cmd)
-        else:
-            run = f"{shlex.quote(str(Path(wienroot) / 'run_lapw'))} -p -cc 0.0001 -ec 0.0001 -i 100"
+        run = str(
+            cfg.get(
+                "dft.run_command",
+                f"{shlex.quote(str(Path(wienroot) / 'run_lapw'))} -p -cc 0.0001 -ec 0.0001 -i 100",
+            )
+        )
         return [
-            'NP=$(wc -l < "$PBS_NODEFILE")',
-            'HOST=$(head -n 1 "$PBS_NODEFILE")',
+            *_pbs_np_snippet(cfg),
+            f'NODEFILE="${{{str(cfg.get("scheduler.nodefile_env", "PBS_NODEFILE"))}:-}}"',
+            'if [ -z "$NODEFILE" ] || [ ! -s "$NODEFILE" ]; then echo "ERROR: scheduler nodefile is unavailable" >&2; exit 2; fi',
+            'HOST=$(head -n 1 "$NODEFILE")',
             'printf "1:%s:%s\\n" "$HOST" "$NP" > .machines',
             'printf "%s\\n" "granularity:1" "extrafine:1" >> .machines',
             'echo ".machines:"',
@@ -136,23 +135,42 @@ def _native_commands(cfg, stage: str) -> list[str]:
         ]
 
     if stage == "dmft":
+        run = cfg.get("dmft.run_command")
+        if run:
+            command = str(run)
+        else:
+            command = f"{shlex.quote(python)} {shlex.quote(str(Path(edmft_root) / 'run_dmft.py'))}"
         return [
             *_mpi_prefix_lines(cfg),
-            f"{shlex.quote(python)} {shlex.quote(str(Path(edmft_root) / 'run_dmft.py'))} > dmft.out 2>&1",
+            f"{command} > dmft.out 2>&1",
             "test -s info.iterate",
         ]
 
     if stage == "maxent":
+        full_override = cfg.get("maxent.run_command")
+        if full_override:
+            return [
+                *_pbs_np_snippet(cfg),
+                f"{str(full_override)} > sig1.out 2>&1",
+                "test -s Sig.out",
+            ]
         launcher = _maxent_mpi_launcher(cfg)
         npflag = str(cfg.get("maxent.mpi_np_flag", "-np"))
+        extra = cfg.get("maxent.mpi_extra_args", [])
+        if isinstance(extra, str):
+            extra = shlex.split(extra)
+        extra_text = " ".join(shlex.quote(str(x)) for x in extra)
         maxent = shlex.quote(str(Path(edmft_root) / "maxent_run.py"))
+        launch = f'"$MPI" {shlex.quote(npflag)} "$NP"'
+        if extra_text:
+            launch += " " + extra_text
         return [
-            'NP=$(wc -l < "$PBS_NODEFILE")',
+            *_pbs_np_snippet(cfg),
             f"MPI={shlex.quote(launcher)}",
-            f"echo \"$MPI {npflag} $NP\" > mpi_prefix.dat",
+            f"echo \"$MPI {npflag} $NP{(' ' + extra_text) if extra_text else ''}\" > mpi_prefix.dat",
             'echo "MaxEnt MPI launcher=$MPI"',
             'echo "MaxEnt MPI ranks=$NP"',
-            f'"$MPI" {shlex.quote(npflag)} "$NP" "$ENV/bin/python" {maxent} sig.inpx > sig1.out 2>&1',
+            f"{launch} {shlex.quote(python)} {maxent} sig.inpx > sig1.out 2>&1",
             "test -s Sig.out",
         ]
 
@@ -160,7 +178,7 @@ def _native_commands(cfg, stage: str) -> list[str]:
 
 
 def render_pbs(cfg, stage: str) -> str:
-    """Render a self-contained PBS script with visible native commands."""
+    """Render a standalone PBS script from config.toml + the selected site profile."""
     if stage not in PBS_STAGES:
         raise WorkflowError(f"PBS is only used for: {', '.join(PBS_STAGES)}")
 
@@ -174,33 +192,49 @@ def render_pbs(cfg, stage: str) -> str:
     cwd = _stage_dir(cfg, stage)
     scratch = cwd / "tmp"
 
+    resource_template = str(
+        cfg.get("scheduler.resource_template", "#PBS -l nodes={nodes}:ppn={ppn}")
+    )
+    resource_line = resource_template.format(nodes=nodes, ppn=ppn, mem=mem, walltime=walltime, queue=queue or "")
+
     lines = [
         "#!/bin/bash",
         f"#PBS -N {name}",
         "#PBS -j oe",
-        f"#PBS -l nodes={nodes}:ppn={ppn}",
+        resource_line,
         f"#PBS -l walltime={walltime}",
     ]
     if mem:
-        lines.append(f"#PBS -l mem={mem}")
+        mem_template = str(cfg.get("scheduler.memory_template", "#PBS -l mem={mem}"))
+        lines.append(mem_template.format(mem=mem, nodes=nodes, ppn=ppn))
     if queue:
-        lines.append(f"#PBS -q {queue}")
+        queue_template = str(cfg.get("scheduler.queue_template", "#PBS -q {queue}"))
+        lines.append(queue_template.format(queue=queue))
+
+    submit = str(cfg.get("scheduler.submit_command", "qsub"))
+    job_env = str(cfg.get("scheduler.jobid_env", "PBS_JOBID"))
+    node_env = str(cfg.get("scheduler.nodefile_env", "PBS_NODEFILE"))
 
     lines += [
         "",
         "# Generated by edmft_workflow. This file is intentionally standalone.",
-        "# It contains no workflow runtime dependency or project-config lookup.",
-        "# Inspect it, then submit manually with: qsub <this-file>",
+        "# Runtime/site settings are frozen here; compute nodes do not read config.toml or site.toml.",
+        f"# Inspect it, then submit manually with: {submit} <this-file>",
         "",
     ]
 
-    preamble = _maxent_preamble(cfg, cwd, scratch) if stage == "maxent" else shell_preamble(cfg, cwd, scratch=scratch)
+    preamble = shell_preamble(
+        cfg,
+        cwd,
+        scratch=scratch,
+        profile="maxent" if stage == "maxent" else "native",
+    )
 
     lines += [
         preamble,
         "",
-        'echo "PBS_JOBID=${PBS_JOBID:-none}"',
-        'echo "PBS_NODEFILE=${PBS_NODEFILE:-none}"',
+        f'echo "scheduler job id=${{{job_env}:-none}}"',
+        f'echo "scheduler nodefile=${{{node_env}:-none}}"',
         'echo "working directory=$PWD"',
         "",
         *_native_commands(cfg, stage),
@@ -224,9 +258,10 @@ def write_pbs(cfg, stage: str, force: bool = False) -> Path:
         print(f"[backup] {path} -> {backup}")
     path.write_text(render_pbs(cfg, stage), encoding="utf-8")
     manifest = refresh_stage_manifest(out, extra_prepared=[path])
+    submit = str(cfg.get("scheduler.submit_command", "qsub"))
     print(f"Standalone PBS written: {path}")
     if manifest is not None:
         print(f"Manifest refreshed at PBS freeze point: {manifest}")
     print(f"Inspect: cat {path}")
-    print(f"Submit manually: qsub {path}")
+    print(f"Submit manually: {submit} {path}")
     return path
