@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Reproducible automation for WIEN2k + Haule eDMFT post-processing: convergence checks, MaxEnt, real-axis DOS, and A(k,w)."
 readme = "README.md"
 requires-python = ">=3.9"
-authors = [{name = "yangke25491"}]
+authors = [{name = "edmft_workflow contributors"}]
 dependencies = [
   "numpy>=1.22",
   "matplotlib>=3.5",
