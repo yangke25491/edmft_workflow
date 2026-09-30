@@ -13,21 +13,47 @@ from edmft_workflow.utils import WorkflowError, build_helper_env, edmft_helper_c
 def make_cfg(tmp_path: Path) -> WorkflowConfig:
     data = {
         "project": {"case": "dft", "root_dir": str(tmp_path)},
-        "environment": {
-            "wienroot": "/opt/wien2k",
-            "edmft_root": "/opt/edmft",
-            "python": "/opt/miniforge3/envs/edmft/bin/python",
-            "python_bin_dir": "/opt/miniforge3/envs/edmft/bin",
-            "intel_root": "/opt/intel2019",
-            "intel_arch": "intel64",
-            "fftw_lib": "/opt/fftw/lib",
-        },
-        "parallel": {"mpi_launcher": "/opt/intel/bin/mpirun", "write_mpi_prefix2": True},
         "foreground": {"dos_np": 6, "band_np": 7},
         "pbs": {"queue": "batch", "nodes": 1, "ppn": 4, "walltime": "01:00:00"},
         "pbs_maxent": {"ppn": 2},
     }
-    return WorkflowConfig(data=data, source=tmp_path / "config.toml")
+    site = {
+        "software": {
+            "wienroot": "/opt/wien2k",
+            "edmft_root": "/opt/edmft",
+            "python": "/opt/miniforge3/envs/edmft/bin/python",
+            "python_bin_dir": "/opt/miniforge3/envs/edmft/bin",
+        },
+        "runtime": {
+            "intel_root": "/opt/intel2019",
+            "intel_arch": "intel64",
+            "fftw_lib": "/opt/fftw/lib",
+            "env": {},
+            "maxent": {
+                "setup_commands": [
+                    "source /opt/miniforge3/etc/profile.d/conda.sh",
+                    "conda activate edmft",
+                ]
+            },
+        },
+        "mpi": {
+            "native": {"launcher": "/opt/intel/bin/mpirun", "np_flag": "-np"},
+            "maxent": {"launcher": "/opt/miniforge3/envs/edmft/bin/mpirun", "np_flag": "-np"},
+        },
+        "wien2k": {"write_mpi_prefix2": True},
+        "scheduler": {
+            "jobid_env": "PBS_JOBID",
+            "nodefile_env": "PBS_NODEFILE",
+            "slot_count_source": "nodefile",
+            "resource_template": "#PBS -l nodes={nodes}:ppn={ppn}",
+        },
+    }
+    return WorkflowConfig(
+        data=data,
+        source=tmp_path / "config.toml",
+        site=site,
+        site_source=tmp_path / "site.toml",
+    )
 
 
 def test_upstream_maxent_template_is_explicit_python():
@@ -40,7 +66,7 @@ def test_upstream_maxent_template_is_explicit_python():
     assert params["SymCum"] is True
 
 
-def test_prepare_helper_uses_absolute_python_and_minimal_environment(tmp_path):
+def test_prepare_helper_uses_site_python_and_minimal_environment(tmp_path):
     cfg = make_cfg(tmp_path)
     cmd = edmft_helper_command(cfg, "saverage.py")
     assert cmd == ["/opt/miniforge3/envs/edmft/bin/python", "/opt/edmft/saverage.py"]
@@ -57,12 +83,11 @@ def test_prepare_helper_uses_absolute_python_and_minimal_environment(tmp_path):
     assert "PYTHONPATH" not in env
     assert "OMP_NUM_THREADS" not in env
     assert "MKL_NUM_THREADS" not in env
-    assert not any(key.startswith("I_MPI_") for key in env)
 
 
 def test_full_job_preamble_deduplicates_thread_settings(tmp_path):
     cfg = make_cfg(tmp_path)
-    cfg.data["environment_extra"] = {
+    cfg.site["runtime"]["env"] = {
         "OMP_NUM_THREADS": "2",
         "MKL_NUM_THREADS": "3",
         "I_MPI_HYDRA_BOOTSTRAP": "ssh",
@@ -96,7 +121,7 @@ def test_real_axis_conversion_preserves_matsubara_backup(tmp_path):
     assert "dft.indmfl" in diff
 
 
-def test_maxent_pbs_matches_validated_openmpi_launch(tmp_path):
+def test_maxent_pbs_is_frozen_from_site_runtime_and_mpi(tmp_path):
     cfg = make_cfg(tmp_path)
     (cfg.dmft_dir / "maxent").mkdir(parents=True, exist_ok=True)
 
@@ -109,7 +134,7 @@ def test_maxent_pbs_matches_validated_openmpi_launch(tmp_path):
     assert "linux/mpi/intel64/lib/release" in text
     assert "MPI=/opt/miniforge3/envs/edmft/bin/mpirun" in text
     assert 'echo "$MPI -np $NP" > mpi_prefix.dat' in text
-    assert '"$MPI" -np "$NP" "$ENV/bin/python" /opt/edmft/maxent_run.py sig.inpx > sig1.out 2>&1' in text
+    assert '"$MPI" -np "$NP" /opt/miniforge3/envs/edmft/bin/python /opt/edmft/maxent_run.py sig.inpx > sig1.out 2>&1' in text
     assert "--hostfile" not in text
     assert "Sig.average" not in text
 
@@ -141,13 +166,13 @@ def test_dos_and_band_render_as_foreground_mpi(tmp_path):
     assert "/opt/edmft/x_dmft.py dmftp" in band
 
 
-def test_maxent_can_override_matching_openmpi_launcher(tmp_path):
+def test_project_config_cannot_override_active_site_mpi(tmp_path):
     cfg = make_cfg(tmp_path)
     cfg.data["maxent"] = {
-        "mpi_launcher": "/custom/openmpi/bin/mpirun",
+        "mpi_launcher": "/wrong/from/config/mpirun",
         "mpi_np_flag": "-np",
     }
     (cfg.dmft_dir / "maxent").mkdir(parents=True, exist_ok=True)
     text = render_pbs(cfg, "maxent")
-    assert "MPI=/custom/openmpi/bin/mpirun" in text
-    assert '"$MPI" -np "$NP"' in text
+    assert "MPI=/opt/miniforge3/envs/edmft/bin/mpirun" in text
+    assert "/wrong/from/config/mpirun" not in text
