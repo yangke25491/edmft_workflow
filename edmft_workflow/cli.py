@@ -24,11 +24,19 @@ def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="edmft-workflow",
         description=(
-            "Transparent WIEN2k + Haule eDMFT workflow manager: prepare files, generate standalone PBS for "
-            "DFT/DMFT/MaxEnt, run DOS/band in foreground MPI, check results, and analyze outputs."
+            "Transparent WIEN2k + Haule eDMFT workflow manager: project physics/resources live in config.toml; "
+            "machine software/MPI/scheduler details live in site.toml."
         ),
     )
-    p.add_argument("-c", "--config", default="config.toml", help="Path to TOML configuration")
+    p.add_argument("-c", "--config", default="config.toml", help="Project calculation configuration")
+    p.add_argument(
+        "--site",
+        default=None,
+        help=(
+            "Machine/site profile. Default: EDMFT_WORKFLOW_SITE if set, otherwise site.toml next to config.toml. "
+            "Legacy configs with embedded environment sections remain readable when no site profile is present."
+        ),
+    )
     sub = p.add_subparsers(dest="command", required=True)
 
     sub.add_parser("init-layout", help="Create project directories; does not run scientific initializers")
@@ -96,12 +104,15 @@ def _print_checks(rows) -> bool:
 
 
 def _print_fermi_warnings(cfg, stage: str) -> None:
-    """Print Fermi-level consistency diagnostics without changing exit status."""
     for detail in fermi_warnings(cfg, stage):
         print(f"WARN  {'Fermi-level consistency':26s}  {detail}")
 
 
 def _status(cfg) -> None:
+    if cfg.site_source:
+        print(f"SITE  {'machine profile':18s}  {cfg.site_source}")
+    else:
+        print(f"SITE  {'machine profile':18s}  legacy config / not loaded")
     case = cfg.case
     stages = [
         ("DFT result", cfg.dft_dir / f"{case}.scf"),
@@ -152,7 +163,7 @@ def _analyze(cfg, plot_format: str | None = None) -> None:
 def main(argv=None) -> int:
     args = _build_parser().parse_args(argv)
     try:
-        cfg = load_config(args.config)
+        cfg = load_config(args.config, site_path=args.site)
 
         if args.command == "init-layout":
             init_layout(cfg)
