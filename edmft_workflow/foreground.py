@@ -19,12 +19,7 @@ def _stage_dir(cfg, stage: str) -> Path:
 
 def _mpi_launcher(cfg) -> str:
     configured = cfg.get("parallel.mpi_launcher")
-    if configured:
-        return str(configured)
-    intel = cfg.get("environment.intel_root")
-    if intel:
-        return str(Path(str(intel)) / "linux/mpi/intel64/bin/mpirun")
-    return "mpirun"
+    return str(configured) if configured else "mpirun"
 
 
 def _stage_np(cfg, stage: str) -> int:
@@ -46,6 +41,12 @@ def render_foreground(cfg, stage: str) -> str:
     np = _stage_np(cfg, stage)
     launcher = _mpi_launcher(cfg)
     npflag = str(cfg.get("parallel.mpi_np_flag", "-np"))
+    extra = cfg.get("parallel.mpi_extra_args", [])
+    if isinstance(extra, str):
+        extra = shlex.split(extra)
+    extra_text = " ".join(shlex.quote(str(x)) for x in extra)
+    prefix = f"$MPI {npflag} $NP" + ((" " + extra_text) if extra_text else "")
+
     wienroot = str(cfg.require("environment.wienroot"))
     edmft_root = str(cfg.require("environment.edmft_root"))
 
@@ -54,7 +55,7 @@ def render_foreground(cfg, stage: str) -> str:
         "set -o pipefail",
         f"NP={np}",
         f"MPI={shlex.quote(launcher)}",
-        f"echo \"$MPI {npflag} $NP\" > mpi_prefix.dat",
+        f'echo "{prefix}" > mpi_prefix.dat',
     ]
     if bool(cfg.get("parallel.write_mpi_prefix2", True)):
         lines.append("cp mpi_prefix.dat mpi_prefix.dat2")
