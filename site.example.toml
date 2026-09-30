@@ -1,0 +1,101 @@
+# Machine/site profile for edmft_workflow.
+#
+# Copy this to site.toml (ignored by git) or keep it elsewhere and pass
+#   --site /path/to/site.toml
+# You may also set EDMFT_WORKFLOW_SITE=/path/to/site.toml.
+#
+# This file contains machine-specific information only.  Project physics,
+# requested cores/memory/walltime and frequently tuned run commands remain in
+# config.toml.
+
+[software]
+wienroot = "/path/to/wien2k"
+edmft_root = "/path/to/eDMFT/bin"
+python = "/path/to/python"
+# Optional; derived from software.python when omitted.
+# python_bin_dir = "/path/to/bin"
+
+[runtime]
+# Generic shell setup.  These commands are frozen into generated PBS scripts
+# and foreground child shells; they never modify the user's login shell.
+setup_commands = [
+  # "source /path/to/compiler/setup.sh",
+  # "module load intel",
+]
+prepend_path = []
+prepend_ld_library_path = []
+ulimit_stack = "unlimited"
+ulimit_core = "unlimited"
+# Optional legacy helpers if an older Intel installation is used:
+# intel_root = "/path/to/intel"
+# intel_arch = "intel64"
+# fftw_lib = "/path/to/fftw/lib"
+
+[runtime.env]
+OMP_NUM_THREADS = "1"
+MKL_NUM_THREADS = "1"
+# I_MPI_HYDRA_BOOTSTRAP = "ssh"
+# I_MPI_FABRICS = "shm"
+
+# Extra setup layered only onto the MaxEnt child/PBS environment.
+# Useful when mpi4py belongs to a different MPI stack from native eDMFT.
+[runtime.maxent]
+setup_commands = []
+prepend_path = []
+prepend_ld_library_path = []
+
+[runtime.maxent.env]
+OMP_NUM_THREADS = "1"
+MKL_NUM_THREADS = "1"
+
+[mpi.native]
+launcher = "/path/to/native/mpirun"
+np_flag = "-np"
+extra_args = []
+
+[mpi.maxent]
+launcher = "/path/to/mpi4py-compatible/mpirun"
+np_flag = "-np"
+extra_args = []
+
+[wien2k]
+machines_mode = "single_node_compact"
+write_mpi_prefix2 = true
+dmft_wien_machines = false
+
+[scheduler]
+# Names of scheduler-provided environment variables.
+jobid_env = "PBS_JOBID"
+nodefile_env = "PBS_NODEFILE"
+submit_command = "qsub"
+
+# How to obtain the allocated MPI/CPU slot count.  No scheduler brand is
+# hard-coded in the workflow. Choose one behavior for this machine:
+#   "nodefile" : line count of nodefile_env (one line per allocated slot)
+#   "env"      : first integer found in slot_count_envs
+#   "command"  : run slot_count_command; it must print one integer
+#   "auto"     : env -> command -> nodefile
+slot_count_source = "nodefile"
+slot_count_envs = ["PBS_NP", "NCPUS"]
+
+# For a scheduler whose nodefile contains one line per host rather than one
+# line per CPU slot, switch to command mode and provide a command that prints
+# the allocation size.  {jobid} and {nodefile} are replaced by the current job
+# id/nodefile without embedding scheduler-specific logic in the Python code.
+# slot_count_source = "command"
+# slot_count_command = "qstat -f {jobid} | awk '/resources_used.ncpus/{print $NF; exit}'"
+
+# Resource request syntax is also a site policy.  Keep the first form on sites
+# accepting nodes/ppn.  A different installation can use, for example, a
+# select/ncpus form without changing workflow code.
+resource_template = "#PBS -l nodes={nodes}:ppn={ppn}"
+# resource_template = "#PBS -l select={nodes}:ncpus={ppn}:mpiprocs={ppn}"
+memory_template = "#PBS -l mem={mem}"
+queue_template = "#PBS -q {queue}"
+
+[checks]
+# Optional shared libraries to load-test during `doctor env`.
+# Keep site-specific runtime assumptions here instead of in Python code.
+shared_libraries = []
+# Example:
+# shared_libraries = ["libmkl_rt.so"]
