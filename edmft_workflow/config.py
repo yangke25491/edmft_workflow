@@ -16,6 +16,7 @@ class ConfigError(RuntimeError):
 
 
 _MISSING = object()
+WORKFLOW_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _expand(value: Any, base: Path) -> Any:
@@ -254,20 +255,19 @@ class WorkflowConfig:
 
 
 def _resolve_site_path(config_path: Path, site_path: str | Path | None) -> Path | None:
+    """Resolve the machine profile.
+
+    The normal layout has exactly one private ``site.toml`` in the workflow
+    checkout root and one ``config.toml`` per calculation directory.  ``--site``
+    is the explicit escape hatch for another machine profile.
+    """
     if site_path is not None:
         candidate = Path(site_path).expanduser().resolve()
         if not candidate.exists():
             raise ConfigError(f"Site configuration file not found: {candidate}")
         return candidate
 
-    env_site = os.environ.get("EDMFT_WORKFLOW_SITE")
-    if env_site:
-        candidate = Path(env_site).expanduser().resolve()
-        if not candidate.exists():
-            raise ConfigError(f"EDMFT_WORKFLOW_SITE does not exist: {candidate}")
-        return candidate
-
-    candidate = config_path.with_name("site.toml")
+    candidate = WORKFLOW_ROOT / "site.toml"
     return candidate if candidate.exists() else None
 
 
