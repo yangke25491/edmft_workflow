@@ -28,11 +28,21 @@ def _expand(value: Any, base: Path) -> Any:
     return value
 
 
-def _deep_expand(obj: Any, base: Path) -> Any:
+def _expand_command(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    return os.path.expandvars(os.path.expanduser(value))
+
+
+def _deep_expand(obj: Any, base: Path, trail: tuple[str, ...] = ()) -> Any:
     if isinstance(obj, dict):
-        return {k: _deep_expand(v, base) for k, v in obj.items()}
+        return {k: _deep_expand(v, base, trail + (str(k),)) for k, v in obj.items()}
     if isinstance(obj, list):
-        return [_deep_expand(v, base) for v in obj]
+        return [_deep_expand(v, base, trail) for v in obj]
+    # Command strings are not filesystem paths. Preserve spaces, arguments and
+    # embedded absolute paths while still expanding ~ and environment variables.
+    if trail and (trail[-1].endswith("_command") or trail[0] == "commands"):
+        return _expand_command(obj)
     return _expand(obj, base)
 
 
