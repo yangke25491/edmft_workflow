@@ -6,13 +6,11 @@ Recommended layout:
 
 ```text
 ~/apps/
-└── edmft_workflow/              # git clone; workflow code only
+└── edmft_workflow/              # git clone
     ├── workflow.py
     ├── site.example.toml
+    ├── site.toml                # private machine profile; configure once
     └── edmft_workflow/
-
-~/sites/
-└── edmft-site.toml              # private machine profile; configure once
 
 ~/calculations/
 ├── MnO/
@@ -25,25 +23,38 @@ Recommended layout:
     └── dmft/
 ```
 
-No `pip install`, alias, `.bashrc` modification, or sourced `env.sh` is required. Machine-specific software paths, compiler/MKL/FFTW setup, MPI launchers, and scheduler semantics live in `site.toml`; calculation-specific physics and requested resources remain in `config.toml`.
+No `pip install`, alias, `.bashrc` modification, or sourced `env.sh` is required. Machine-specific software paths, compiler/MKL/FFTW setup, MPI launchers, and scheduler semantics live in the workflow-root `site.toml`; calculation-specific physics and requested resources remain in each calculation's `config.toml`.
 
-Select a site profile in any of three ways:
+Create the default site profile once:
 
 ```bash
-# explicit
-python ~/apps/edmft_workflow/workflow.py \
-  --site ~/sites/edmft-site.toml \
-  -c ~/calculations/MnO/config.toml status
-
-# environment pointer
-export EDMFT_WORKFLOW_SITE=~/sites/edmft-site.toml
-python ~/apps/edmft_workflow/workflow.py -c ~/calculations/MnO/config.toml status
-
-# or put a private site.toml next to config.toml
-cp ~/apps/edmft_workflow/site.example.toml ~/calculations/MnO/site.toml
+cd ~/apps/edmft_workflow
+cp site.example.toml site.toml
 ```
 
-`site.toml` is gitignored by this repository.
+Then normal calculation commands need only the project config:
+
+```bash
+python ~/apps/edmft_workflow/workflow.py \
+  -c ~/calculations/MnO/config.toml status
+```
+
+An alternate site profile can be selected explicitly when needed:
+
+```bash
+python ~/apps/edmft_workflow/workflow.py \
+  --site ~/sites/other-cluster.toml \
+  -c ~/calculations/MnO/config.toml status
+```
+
+Selection is therefore:
+
+```text
+--site /explicit/path/site.toml
+otherwise workflow-repository-root/site.toml
+```
+
+The default `site.toml` is ignored by git.
 
 ## What belongs where
 
@@ -108,4 +119,4 @@ cd ~/apps/edmft_workflow
 git pull
 ```
 
-The next invocation of `workflow.py` uses the updated source immediately.
+The next invocation of `workflow.py` uses the updated source immediately, while the gitignored `site.toml` remains in place.
