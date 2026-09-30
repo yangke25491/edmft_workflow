@@ -1,5 +1,6 @@
 # Site/user-specific configuration
 config.toml
+site.toml
 *.local.toml
 .env
 
