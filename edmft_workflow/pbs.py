@@ -56,7 +56,7 @@ def _maxent_mpi_launcher(cfg) -> str:
 
 
 def _maxent_preamble(cfg, cwd: Path, scratch: Path) -> str:
-    """Mirror the cluster MaxEnt environment that has been validated by the user.
+    """Build the MaxEnt environment without relying on the caller's login shell.
 
     Intel compiler/MKL runtime is loaded first, the eDMFT conda environment is
     activated, and MaxEnt itself is launched explicitly with ENV/bin/mpirun so
@@ -94,11 +94,26 @@ def _maxent_preamble(cfg, cwd: Path, scratch: Path) -> str:
     return "\n".join(lines)
 
 
+def _pbs_np_snippet() -> list[str]:
+    """Shell lines computing the number of allocated MPI slots.
+
+    Works on both Torque (one PBS_NODEFILE line per slot) and PBS Pro (one
+    line per host; falls back to qstat resources_used.ncpus).
+    """
+    return [
+        'NP=$(wc -l < "$PBS_NODEFILE")',
+        'if [ "$NP" -eq 1 ] && [ -n "${PBS_JOBID:-}" ]; then',
+        '    NP=$(qstat -f "$PBS_JOBID" 2>/dev/null | awk \'/resources_used.ncpus/{print $NF; exit}\')',
+        "fi",
+        "NP=${NP:-1}",
+    ]
+
+
 def _mpi_prefix_lines(cfg) -> list[str]:
     launcher = _mpi_launcher(cfg)
     npflag = str(cfg.get("parallel.mpi_np_flag", "-np"))
     lines = [
-        'NP=$(wc -l < "$PBS_NODEFILE")',
+        *_pbs_np_snippet(),
         f"MPI={shlex.quote(launcher)}",
         f"echo \"$MPI {npflag} $NP\" > mpi_prefix.dat",
     ]
@@ -125,7 +140,7 @@ def _native_commands(cfg, stage: str) -> list[str]:
         else:
             run = f"{shlex.quote(str(Path(wienroot) / 'run_lapw'))} -p -cc 0.0001 -ec 0.0001 -i 100"
         return [
-            'NP=$(wc -l < "$PBS_NODEFILE")',
+            *_pbs_np_snippet(),
             'HOST=$(head -n 1 "$PBS_NODEFILE")',
             'printf "1:%s:%s\\n" "$HOST" "$NP" > .machines',
             'printf "%s\\n" "granularity:1" "extrafine:1" >> .machines',
@@ -147,7 +162,7 @@ def _native_commands(cfg, stage: str) -> list[str]:
         npflag = str(cfg.get("maxent.mpi_np_flag", "-np"))
         maxent = shlex.quote(str(Path(edmft_root) / "maxent_run.py"))
         return [
-            'NP=$(wc -l < "$PBS_NODEFILE")',
+            *_pbs_np_snippet(),
             f"MPI={shlex.quote(launcher)}",
             f"echo \"$MPI {npflag} $NP\" > mpi_prefix.dat",
             'echo "MaxEnt MPI launcher=$MPI"',
