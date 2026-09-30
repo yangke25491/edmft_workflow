@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import os
 import shlex
+import subprocess
 
 from .utils import WorkflowError, require_file, run_stage
 
@@ -18,10 +19,40 @@ def pbs_hosts() -> list[str]:
     return [line.strip() for line in path.read_text().splitlines() if line.strip()]
 
 
+def _pbs_allocated_ncpus() -> int | None:
+    """Ask PBS for the allocated CPU count of the current job.
+
+    Torque expands PBS_NODEFILE with one line per slot, so len(hosts) is the
+    rank count. PBS Pro may write only one line per
+    host; the authoritative slot count is resources_used.ncpus.
+    """
+    jobid = os.environ.get("PBS_JOBID")
+    if not jobid:
+        return None
+    try:
+        cp = subprocess.run(
+            ["qstat", "-f", jobid], capture_output=True, text=True, timeout=10
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    for line in (cp.stdout or "").splitlines():
+        if "resources_used.ncpus" in line:
+            _, _, val = line.partition("=")
+            val = val.strip()
+            if val.isdigit():
+                return max(1, int(val))
+    return None
+
+
 def allocated_ranks() -> int:
     hosts = pbs_hosts()
     if hosts:
-        return len(hosts)
+        ranks = len(hosts)
+        if ranks == 1:
+            # A single line is ambiguous: Torque would have one line per slot
+            # (ppn=1), PBS Pro reports one line per host regardless of slots.
+            ranks = _pbs_allocated_ncpus() or ranks
+        return ranks
     for key in ("PBS_NP", "NCPUS"):
         raw = os.environ.get(key)
         if raw and raw.isdigit():
@@ -87,7 +118,7 @@ def write_edmft_mpi_prefix(cfg, cwd: Path, stage: str) -> int:
 
 
 def _write_single_node_compact_machines(cfg, cwd: Path, stage: str) -> Path:
-    """Reproduce the user's validated single-node WIEN2k `.machines` file.
+    """Reproduce the validated single-node WIEN2k `.machines` file.
 
     PBS form:
         1:<first-host>:<number-of-slots>
@@ -104,6 +135,9 @@ def _write_single_node_compact_machines(cfg, cwd: Path, stage: str) -> Path:
             )
         host = unique[0]
         np = len(hosts)
+        if np == 1:
+            # PBS Pro: nodefile has one line per host; use the slot count.
+            np = _pbs_allocated_ncpus() or np
     else:
         host = "localhost"
         np = stage_ranks(cfg, stage)
