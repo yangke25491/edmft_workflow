@@ -6,16 +6,16 @@ The workflow automates repetitive file preparation, checks, runtime setup, and p
 
 ## Configuration model
 
-The workflow now separates **calculation choices** from **machine environment**.
+The workflow separates **calculation choices** from **machine environment**.
 
 ```text
-config.toml
+calculation/config.toml
     = physics + frequently tuned run settings
       (case, DMFT/MaxEnt/DOS/band parameters,
        requested cores/memory/walltime/queue,
        foreground ranks, command overrides)
 
-site.toml
+workflow-repository/site.toml
     = machine/site environment
       (WIEN2k/eDMFT/Python locations,
        compiler/MKL/FFTW setup,
@@ -23,18 +23,58 @@ site.toml
        scheduler environment variables and slot-count semantics)
 ```
 
-`site.toml` is ignored by git. Start from:
+The normal layout is therefore:
+
+```text
+~/apps/edmft_workflow/
+├── workflow.py
+├── edmft_workflow/
+├── site.example.toml
+└── site.toml              # private machine profile, ignored by git
+
+~/test/DMFT/MnO/
+├── config.toml            # this calculation only
+├── inputs/
+├── dft/
+└── dmft/
+
+~/test/DMFT/La3Ni2O7/
+├── config.toml
+├── inputs/
+├── dft/
+└── dmft/
+```
+
+Create the machine profile once in the workflow repository root:
 
 ```bash
+cd ~/apps/edmft_workflow
 cp site.example.toml site.toml
 ```
 
-The loader chooses the site profile in this order:
+`site.toml` is ignored by git. Every calculation can then keep only its own `config.toml`.
+
+The site-profile selection rule is intentionally simple:
 
 ```text
---site /path/to/site.toml
-EDMFT_WORKFLOW_SITE=/path/to/site.toml
-PROJECT/site.toml
+--site /path/to/another/site.toml   # explicit override, highest priority
+otherwise:
+<workflow-repository-root>/site.toml
+```
+
+For example, normal use needs no `--site`:
+
+```bash
+cd ~/test/DMFT/MnO
+python ~/apps/edmft_workflow/workflow.py -c config.toml doctor env
+```
+
+To use another machine profile explicitly:
+
+```bash
+python ~/apps/edmft_workflow/workflow.py \
+    --site ~/sites/other-cluster.toml \
+    -c config.toml doctor env
 ```
 
 For transition, an old `config.toml` that still contains `[environment]` / `[parallel]` remains readable when no site profile is loaded. Once a site profile is active, machine/runtime values come from `site.toml`, not from old environment entries in `config.toml`.
@@ -64,7 +104,7 @@ slot_count_command = "qstat -f {jobid} | awk '/resources_used.ncpus/{print $NF; 
 resource_template = "#PBS -l select={nodes}:ncpus={ppn}:mpiprocs={ppn}"
 ```
 
-The workflow itself only asks, "how many slots were allocated?" and "what resource-request line should be generated?". Scheduler-specific syntax stays in `site.toml`.
+The workflow itself only asks, "how many slots were allocated?" and "what resource-request line should be generated?" Scheduler-specific syntax stays in `site.toml`.
 
 ## MPI/runtime policy
 
@@ -120,12 +160,11 @@ Lightweight foreground work
 
 Only DFT, DMFT, and MaxEnt generate PBS scripts. DOS and band run in disposable foreground child shells with the site-defined native MPI/runtime. The parent/login shell remains unchanged.
 
-## Directory layout
+## Calculation directory layout
 
 ```text
 PROJECT/
 ├── config.toml
-├── site.toml            # optional project-local machine profile; gitignored
 ├── inputs/
 │   ├── params.dat
 │   ├── maxent_params.dat
@@ -218,7 +257,7 @@ python ~/apps/edmft_workflow/workflow.py -c config.toml analyze all --format bot
 
 ## What stays in config.toml
 
-Examples of calculation-local settings that are intentionally **not** moved to the site profile:
+Calculation-local settings intentionally remain in `config.toml`:
 
 ```toml
 [foreground]
@@ -268,7 +307,7 @@ The check uses the selected `site.toml`. Optional site-specific shared-library c
 shared_libraries = ["libmkl_rt.so"]
 ```
 
-No particular MKL library name is hard-coded into the Python workflow anymore.
+No particular MKL library name is hard-coded into the Python workflow.
 
 ## Fermi-level invariant
 
@@ -278,7 +317,7 @@ After DMFT convergence, `dmft/EF.dat` is the canonical chemical potential. MaxEn
 
 - workflow never calls `qsub` automatically;
 - workflow never modifies persistent shell configuration;
-- machine-specific `site.toml` is gitignored;
+- machine-specific `site.toml` lives in the workflow root and is gitignored;
 - preparation never mutates the upstream calculation directory;
 - real-axis `indmfl` changes are made only in copied DOS/band directories;
 - DFT/DMFT/MaxEnt PBS files are standalone and do not import this workflow at runtime;
