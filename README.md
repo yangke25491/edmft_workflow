@@ -2,11 +2,105 @@
 
 A transparent workflow manager for **WIEN2k + Kristjan Haule eDMFT**.
 
-The workflow automates repetitive file preparation, checks, and runtime setup while keeping the scientific inputs and native WIEN2k/eDMFT commands visible. It never calls `qsub` for you and never modifies the user's persistent shell environment.
+The workflow automates repetitive file preparation, checks, runtime setup, and postprocessing while keeping scientific inputs and native WIEN2k/eDMFT commands visible. It never calls `qsub` automatically and never modifies the user's persistent shell environment.
+
+## Configuration model
+
+The workflow now separates **calculation choices** from **machine environment**.
+
+```text
+config.toml
+    = physics + frequently tuned run settings
+      (case, DMFT/MaxEnt/DOS/band parameters,
+       requested cores/memory/walltime/queue,
+       foreground ranks, command overrides)
+
+site.toml
+    = machine/site environment
+      (WIEN2k/eDMFT/Python locations,
+       compiler/MKL/FFTW setup,
+       native MPI, MaxEnt MPI,
+       scheduler environment variables and slot-count semantics)
+```
+
+`site.toml` is ignored by git. Start from:
+
+```bash
+cp site.example.toml site.toml
+```
+
+The loader chooses the site profile in this order:
+
+```text
+--site /path/to/site.toml
+EDMFT_WORKFLOW_SITE=/path/to/site.toml
+PROJECT/site.toml
+```
+
+For transition, an old `config.toml` that still contains `[environment]` / `[parallel]` remains readable when no site profile is loaded. Once a site profile is active, machine/runtime values come from `site.toml`, not from old environment entries in `config.toml`.
+
+## Scheduler policy is behavior-driven
+
+The Python code does not branch on names such as "Torque" or "PBS Pro". The site profile describes how the local scheduler behaves:
+
+```toml
+[scheduler]
+jobid_env = "PBS_JOBID"
+nodefile_env = "PBS_NODEFILE"
+submit_command = "qsub"
+slot_count_source = "nodefile"
+resource_template = "#PBS -l nodes={nodes}:ppn={ppn}"
+```
+
+For a system where the nodefile contains hosts rather than one line per CPU slot, configure a command that prints the actual allocation:
+
+```toml
+[scheduler]
+jobid_env = "PBS_JOBID"
+nodefile_env = "PBS_NODEFILE"
+submit_command = "qsub"
+slot_count_source = "command"
+slot_count_command = "qstat -f {jobid} | awk '/resources_used.ncpus/{print $NF; exit}'"
+resource_template = "#PBS -l select={nodes}:ncpus={ppn}:mpiprocs={ppn}"
+```
+
+The workflow itself only asks, "how many slots were allocated?" and "what resource-request line should be generated?". Scheduler-specific syntax stays in `site.toml`.
+
+## MPI/runtime policy
+
+Native WIEN2k/eDMFT and MaxEnt may use different MPI implementations. They are configured independently:
+
+```toml
+[mpi.native]
+launcher = "/path/to/native/mpirun"
+np_flag = "-np"
+
+[mpi.maxent]
+launcher = "/path/to/mpi4py-compatible/mpirun"
+np_flag = "-np"
+```
+
+Common runtime setup belongs in `[runtime]`; MaxEnt-only additions belong in `[runtime.maxent]`:
+
+```toml
+[runtime]
+setup_commands = ["source /path/to/compiler/setup.sh"]
+prepend_path = []
+prepend_ld_library_path = []
+
+[runtime.env]
+OMP_NUM_THREADS = "1"
+MKL_NUM_THREADS = "1"
+
+[runtime.maxent]
+setup_commands = []
+prepend_path = []
+prepend_ld_library_path = []
+```
+
+Generated PBS files are still **standalone static scripts**. `config.toml` and `site.toml` are read only while generating the script; compute nodes do not read either file at runtime.
 
 ## Execution model
-
-The current production model is deliberately split into three classes:
 
 ```text
 Heavy PBS jobs
@@ -24,13 +118,14 @@ Lightweight foreground work
   analyze / plots
 ```
 
-Only DFT, DMFT, and MaxEnt generate PBS scripts. DOS and band run directly in a disposable foreground child shell with their own MPI setup. The parent/login shell is unchanged after the command exits.
+Only DFT, DMFT, and MaxEnt generate PBS scripts. DOS and band run in disposable foreground child shells with the site-defined native MPI/runtime. The parent/login shell remains unchanged.
 
 ## Directory layout
 
 ```text
 PROJECT/
 ├── config.toml
+├── site.toml            # optional project-local machine profile; gitignored
 ├── inputs/
 │   ├── params.dat
 │   ├── maxent_params.dat
@@ -50,46 +145,34 @@ PROJECT/dft : init_lapw
 PROJECT/dft : init_dmft.py     # after DFT convergence
 ```
 
-## Zero-interference policy
+## Basic workflow
 
-`prepare-*`, `doctor`, `check`, `status`, and `analyze` do not source Intel `compilervars.sh`, rewrite the user's shell, edit `.bashrc`, or install aliases. Lightweight upstream helpers such as `dmft_copy.py`, `szero.py`, and `saverage.py` are invoked with explicit paths in child processes.
-
-Numerical execution owns its environment locally:
-
-```text
-PBS DFT/DMFT/MaxEnt
-    → runtime exists only inside run_*.pbs
-
-run dos / run band
-    → runtime exists only inside a child bash process
-    → exits cleanly when postprocessing finishes
-```
-
-## DFT
+Initialize the layout:
 
 ```bash
 python ~/apps/edmft_workflow/workflow.py -c config.toml init-layout
-
-cd dft
-init_lapw
 ```
 
-Generate the DFT PBS:
+DFT:
 
 ```bash
+cd dft
+init_lapw
+cd ..
 python ~/apps/edmft_workflow/workflow.py -c config.toml pbs dft
 cat dft/run_dft.pbs
 qsub dft/run_dft.pbs
 ```
 
-After convergence:
+After DFT convergence:
 
 ```bash
 cd dft
 init_dmft.py
+cd ..
 ```
 
-## DMFT
+DMFT:
 
 ```bash
 python ~/apps/edmft_workflow/workflow.py -c config.toml prepare-dmft
@@ -99,159 +182,109 @@ cat dmft/run_dmft.pbs
 qsub dmft/run_dmft.pbs
 ```
 
-The DMFT PBS uses the native Intel MPI stack and writes `mpi_prefix.dat` from the actual `$PBS_NODEFILE` allocation before running `run_dmft.py`.
-
-## MaxEnt analytic continuation
-
-Prepare:
+MaxEnt:
 
 ```bash
 python ~/apps/edmft_workflow/workflow.py -c config.toml prepare-maxent
-```
-
-The preparation follows:
-
-```text
-last N sig.inp.*.<impurity>
-        ↓
-saverage.py
-        ↓
-sig.inpx
-        +
-maxent_params.dat
-```
-
-Inspect:
-
-```bash
-head dmft/maxent/sig.inpx
-cat dmft/maxent/maxent_params.dat
 python ~/apps/edmft_workflow/workflow.py -c config.toml doctor maxent
-```
-
-Generate the PBS:
-
-```bash
 python ~/apps/edmft_workflow/workflow.py -c config.toml pbs maxent
 cat dmft/maxent/run_maxent.pbs
 qsub dmft/maxent/run_maxent.pbs
 ```
 
-### MaxEnt MPI rule
-
-The validated cluster setup has `mpi4py` built against **Open MPI**, while native WIEN2k/eDMFT uses Intel MPI. Therefore MaxEnt must not be launched with Intel `mpirun`.
-
-The generated MaxEnt PBS mirrors the validated command:
-
-```bash
-ENV=/home/USER/miniforge3/envs/edmft
-MPI="$ENV/bin/mpirun"
-NP=$(wc -l < "$PBS_NODEFILE")
-
-echo "$MPI -np $NP" > mpi_prefix.dat
-
-"$MPI" -np "$NP" \
-    "$ENV/bin/python" \
-    "$WIEN_DMFT_ROOT/maxent_run.py" \
-    sig.inpx > sig1.out 2>&1
-```
-
-The Intel compiler/MKL environment is still loaded because the installed eDMFT/Fortran extensions may need it, but the MaxEnt MPI launcher itself is explicitly the Open MPI launcher next to the configured Python environment.
-
-Current `maxent_run.py` distributes work over active baths/channels. If the input reports `nb=2`, more than two MPI ranks generally do not provide useful bath-level parallelism. The workflow reports the active channel count after `prepare-maxent` so the requested PBS size can be chosen explicitly.
-
-The required output is:
-
-```text
-dmft/maxent/Sig.out
-```
-
-## Real-axis DOS: foreground MPI
-
-After `Sig.out` exists:
+DOS:
 
 ```bash
 python ~/apps/edmft_workflow/workflow.py -c config.toml prepare-dos
 python ~/apps/edmft_workflow/workflow.py -c config.toml doctor dos
-```
-
-`prepare-dos` copies the converged DMFT state into `dmft/onreal/`, copies `Sig.out -> sig.inp`, preserves `CASE.indmfl.matsubara`, and changes only the copied `CASE.indmfl` from Matsubara flag `1` to real-axis flag `0`.
-
-Then run directly in foreground MPI:
-
-```bash
 python ~/apps/edmft_workflow/workflow.py -c config.toml run dos
 ```
 
-The child shell writes `mpi_prefix.dat` using `[foreground].dos_np` and executes:
-
-```text
-x_lapw -f CASE lapw0
-x_dmft.py lapw1
-x_dmft.py dmft1
-```
-
-Logs are streamed to the terminal and saved as `lapw0.log`, `lapw1.log`, and `dmft1.log`.
-
-## Band / A(k,w): foreground MPI
-
-Prepare:
+Band / A(k,w):
 
 ```bash
 python ~/apps/edmft_workflow/workflow.py -c config.toml prepare-band
 python ~/apps/edmft_workflow/workflow.py -c config.toml doctor band
-```
-
-Then:
-
-```bash
 python ~/apps/edmft_workflow/workflow.py -c config.toml run band
 ```
 
-The child shell writes `mpi_prefix.dat` using `[foreground].band_np` and executes:
+Analysis:
 
-```text
-x_dmft.py lapw1 --band
-x_dmft.py dmftp
+```bash
+python ~/apps/edmft_workflow/workflow.py -c config.toml analyze all --format png
+python ~/apps/edmft_workflow/workflow.py -c config.toml analyze all --format pdf
+python ~/apps/edmft_workflow/workflow.py -c config.toml analyze all --format both
 ```
 
-The main output is `dmft/band/eigvals.dat`.
+## What stays in config.toml
 
-## Foreground MPI configuration
-
-Example:
+Examples of calculation-local settings that are intentionally **not** moved to the site profile:
 
 ```toml
 [foreground]
 dos_np = 8
 band_np = 8
+
+[pbs_dft]
+ppn = 64
+walltime = "168:00:00"
+mem = ""
+
+[pbs_dmft]
+ppn = 32
+walltime = "168:00:00"
+mem = ""
+
+[pbs_maxent]
+ppn = 2
+walltime = "24:00:00"
+mem = ""
 ```
 
-These ranks use the native MPI launcher configured under `[parallel]`, normally Intel MPI for WIEN2k/eDMFT.
+Command overrides also remain project-local because they are frequently tuned:
 
-## Core commands
+```toml
+[dft]
+run_command = "run_lapw -p -cc 0.0001 -ec 0.0001 -i 100"
+
+[dmft]
+# run_command = "python run_dmft.py"
+
+[maxent]
+# Full-command override; if set, include the launcher yourself.
+# run_command = "mpirun -np 2 python /path/to/maxent_run.py sig.inpx"
+```
+
+## Environment checking
 
 ```bash
 python ~/apps/edmft_workflow/workflow.py -c config.toml doctor env
-python ~/apps/edmft_workflow/workflow.py -c config.toml doctor dft
-python ~/apps/edmft_workflow/workflow.py -c config.toml doctor dmft
-python ~/apps/edmft_workflow/workflow.py -c config.toml doctor maxent
-python ~/apps/edmft_workflow/workflow.py -c config.toml doctor dos
-python ~/apps/edmft_workflow/workflow.py -c config.toml doctor band
-python ~/apps/edmft_workflow/workflow.py -c config.toml status
-python ~/apps/edmft_workflow/workflow.py -c config.toml analyze all
 ```
+
+The check uses the selected `site.toml`. Optional site-specific shared-library checks can be listed under:
+
+```toml
+[checks]
+shared_libraries = ["libmkl_rt.so"]
+```
+
+No particular MKL library name is hard-coded into the Python workflow anymore.
+
+## Fermi-level invariant
+
+After DMFT convergence, `dmft/EF.dat` is the canonical chemical potential. MaxEnt records the corresponding Fermi-level snapshot; DOS and band inherit the same state. `doctor` prints consistency warnings but never blocks execution solely because of a Fermi-level warning.
 
 ## Safety invariants
 
-- workflow never calls `qsub`;
+- workflow never calls `qsub` automatically;
 - workflow never modifies persistent shell configuration;
+- machine-specific `site.toml` is gitignored;
 - preparation never mutates the upstream calculation directory;
 - real-axis `indmfl` changes are made only in copied DOS/band directories;
 - DFT/DMFT/MaxEnt PBS files are standalone and do not import this workflow at runtime;
 - DOS/band foreground MPI runs happen in disposable child shells;
-- MaxEnt uses the MPI implementation matching its `mpi4py` environment;
-- native WIEN2k/eDMFT stages keep their native Intel MPI runtime;
+- native and MaxEnt MPI stacks are independently configurable;
+- scheduler behavior is data-driven through the site profile;
 - `--force` backs up existing non-empty prepared stage directories before recreating them.
 
 ## Upstream
